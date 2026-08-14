@@ -2,13 +2,16 @@
 
 Both tools shell out rather than touching the store from Python: send_to_albert goes
 through _inbox.mjs (which owns the NTFS write discipline), and start_albert_run goes
-through launch_run.ps1 (which owns .cmd resolution and detached-window quoting).
+through launch_run.ps1 on Windows (which owns .cmd resolution and detached-window
+quoting) or a detached tmux session on POSIX. See _launch_cmd.
 """
 
 import asyncio
 import os
 import re
+import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -68,6 +71,60 @@ def _run(cmd: list[str], env: dict | None = None) -> subprocess.CompletedProcess
         timeout=60,
         env=env,
         creationflags=NO_WINDOW,
+    )
+
+
+class LaunchUnavailable(Exception):
+    """This platform has no usable way to start a detached, attachable run."""
+
+
+def _launch_cmd(project: Path, prompt: str) -> tuple[list[str], str]:
+    """argv that starts a detached /albert session, plus how to watch it.
+
+    Windows goes through launch_run.ps1, which owns .cmd shim resolution and
+    Start-Process quoting. POSIX has neither a .cmd shim nor a console window to
+    start, and a detached `claude` with no controlling terminal exits instead of
+    opening a session, so the run needs a pty that outlives this chat process.
+    tmux is that pty, and `tmux attach` is the closest equivalent to the Windows
+    window: visible, and survives the chat exiting.
+
+    Passing the command as separate argv words keeps any shell out of the path.
+    Verified against tmux 3.2a that $VAR, backticks and semicolons reach the child
+    literally, so nothing re-parses the goal the way cmd.exe does on Windows.
+    """
+    if os.name == "nt":
+        return (
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(LAUNCH_PS1),
+                "-Project",
+                str(project),
+                "-Prompt",
+                prompt,
+            ],
+            "in a new console window",
+        )
+
+    tmux = shutil.which("tmux")
+    if not tmux:
+        raise LaunchUnavailable(
+            "tmux is not installed. On Linux and macOS it is what gives the run a "
+            "terminal that outlives this chat, so the launcher needs it. Install it "
+            "(apt install tmux / brew install tmux) and ask me again."
+        )
+    claude = shutil.which("claude")
+    if not claude:
+        raise LaunchUnavailable("claude CLI not found on PATH.")
+
+    # Second-resolution suffix so two runs in one project do not collide on the name.
+    session = f"albert-{project.name}-{time.strftime('%H%M%S')}"
+    return (
+        [tmux, "new-session", "-d", "-s", session, "-c", str(project), claude, prompt],
+        f"in tmux session {session} (watch it with: tmux attach -t {session})",
     )
 
 
@@ -203,18 +260,10 @@ def make_albert_server(state: SessionState):
         if not goal:
             return _text("goal became empty after removing unsafe characters.", is_error=True)
         prompt = f"/loop /albert {goal}"
-        cmd = [
-            "powershell",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(LAUNCH_PS1),
-            "-Project",
-            str(project),
-            "-Prompt",
-            prompt,
-        ]
+        try:
+            cmd, where = _launch_cmd(project, prompt)
+        except LaunchUnavailable as e:
+            return _text(str(e), is_error=True)
         try:
             proc = await asyncio.to_thread(_run, cmd)
         except (OSError, subprocess.TimeoutExpired) as e:
@@ -223,9 +272,9 @@ def make_albert_server(state: SessionState):
             return _text(f"launch failed: {proc.stderr.strip()}", is_error=True)
 
         return _text(
-            f"Launched /albert in a new console window for {project.name} with goal: "
-            f"{goal}. It registers itself in the run store shortly; watch it live at "
-            "http://127.0.0.1:4400."
+            f"Launched /albert {where} for {project.name} with goal: {goal}. It "
+            "registers itself in the run store shortly; watch it live in the console "
+            "on port 4400."
         )
 
     return create_sdk_mcp_server(
