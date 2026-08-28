@@ -242,6 +242,12 @@ class TestSearch(unittest.TestCase):
         self.connection.commit()
         self.assertEqual(search.toc(self.connection, "vacode", "1")["items"], [])
 
+    def test_a_corpus_gets_its_own_word_for_a_container(self):
+        self.assertEqual(search.container_label("constitution", "title"), "Article")
+        self.assertEqual(search.container_label("vacode", "title"), "Title")
+        self.assertEqual(search.container_label("admincode", "agency"), "Agency")
+        self.assertEqual(search.toc(self.connection, "vacode")["label"], "Title")
+
     def test_toc_of_an_unknown_path_is_empty_not_an_error(self):
         listing = search.toc(self.connection, "vacode", "99.9", "1")
         self.assertEqual(listing["items"], [])

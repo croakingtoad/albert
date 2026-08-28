@@ -300,6 +300,7 @@ def toc(connection, corpus="vacode", *path, include_counts=True):
 
     if children:
         result["level"] = children[0]["kind"] + "s"
+        result["label"] = container_label(corpus, children[0]["kind"])
         result["items"] = [_row_to_dict(row) for row in children]
         # A container can hold both sub-containers and sections the service never
         # placed in one - the UCC titles, which are organized into Parts. Those would
@@ -423,6 +424,16 @@ PLACE_LABELS = {
                   ("article_number", "article_name", "Article")],
     "constitution": [("title_number", "title_name", "Article")],
 }
+
+
+# The containers table calls every top-level node a 'title' so one walk serves all
+# three corpora; only the display name differs.
+CONTAINER_LABELS = {("constitution", "title"): "Article"}
+
+
+def container_label(corpus, kind) -> str:
+    """What this corpus calls a container of that kind, for display."""
+    return CONTAINER_LABELS.get((corpus, kind), (kind or "container").title())
 
 
 def describe_place(record) -> str:

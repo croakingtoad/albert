@@ -210,8 +210,8 @@ def _tool_browse(connection, arguments):
     header = ""
     if listing.get("container"):
         container = listing["container"]
-        header = (f"{container.get('kind', 'container').title()} {container['number']}. "
-                  f"{container['name']}").rstrip(". ")
+        header = (f"{search.container_label(corpus, container.get('kind'))} "
+                  f"{container['number']}. {container['name']}").rstrip(". ")
 
     lines = [header] if header else []
     if listing["level"] == "sections":
@@ -220,7 +220,7 @@ def _tool_browse(connection, arguments):
             flag = "" if item["status"] == "active" else f"  [{item['status']}]"
             lines.append(f"  {search.format_citation(item)} — {item['heading']}{flag}")
     else:
-        label = listing["level"].rstrip("s")
+        label = listing.get("label") or listing["level"].rstrip("s").title()
         lines.append(f"{len(listing['items'])} {listing['level']}:")
         for item in listing["items"]:
             lines.append(f"  {label} {item['number']}: {item['name']} ({item['sections']} sections)")

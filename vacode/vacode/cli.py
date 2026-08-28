@@ -115,14 +115,14 @@ def cmd_toc(args):
     def render(data):
         if data.get("container"):
             container = data["container"]
-            print(f"{container.get('kind', 'container').title()} {container['number']}. "
-                  f"{container['name']}".rstrip(". ") + "\n")
+            label = search.container_label(args.corpus, container.get("kind"))
+            print(f"{label} {container['number']}. {container['name']}".rstrip(". ") + "\n")
         if data["level"] == "sections":
             for item in data["items"]:
                 flag = "" if item["status"] == "active" else f"  [{item['status']}]"
                 print(f"  {search.format_citation(item):<18} {item['heading']}{flag}")
             return
-        label = data["level"].rstrip("s").title()
+        label = data.get("label") or data["level"].rstrip("s").title()
         for item in data["items"]:
             print(f"  {label} {item['number']:<10} {item['name']}  ({item['sections']} sections)")
         for item in data.get("unplaced_sections") or []:
