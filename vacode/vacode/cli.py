@@ -40,8 +40,9 @@ def _format_section(record, *, full=False):
     place = search.describe_place(record)
     if place:
         lines.append(place)
-    if record.get("status") and record["status"] != "active":
-        lines.append(f"STATUS: {record['status'].upper()}")
+    note = search.status_note(record)
+    if note:
+        lines.append(f"STATUS: {note}")
     lines.append("")
     body = record.get("body_text") if full else (record.get("snippet") or record.get("body_text", ""))
     if body:
@@ -50,7 +51,8 @@ def _format_section(record, *, full=False):
         lines += [f"History: {record['history']}", ""]
     if full and record.get("references"):
         lines += ["References: " + ", ".join(record["references"]), ""]
-    lines.append(f"{record.get('url', '')}  (retrieved {record.get('retrieved_at', 'unknown')})")
+    when = record.get("retrieved_at") or ""
+    lines.append(f"{record.get('url', '')}  ({'retrieved ' + when if when else 'text never retrieved'})")
     return "\n".join(lines)
 
 

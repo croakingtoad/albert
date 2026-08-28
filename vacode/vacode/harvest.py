@@ -73,7 +73,7 @@ def container_key_for(corpus: str, row) -> str:
 
 
 _STUB_COLUMNS = (
-    "corpus", "citation", "citation_key", "heading", "url", "sort_key", "container_key",
+    "corpus", "citation", "citation_key", "heading", "url", "sort_key", "container_key", "status",
     "title_number", "title_name", "agency_number", "agency_name",
     "chapter_number", "chapter_name", "article_number", "article_name",
     "part_number", "part_name", "subtitle_number", "subtitle_name",
@@ -84,6 +84,7 @@ _STUB_COLUMNS = (
 def _upsert_stub(connection, values: dict):
     values = dict(values)
     values.setdefault("container_key", container_key_for(values["corpus"], values))
+    values.setdefault("status", "active")
     """Write the structural facts about a section without touching its text.
 
     Structure and body are updated independently so that re-running the (cheap) tree
@@ -333,6 +334,7 @@ def structure_admincode(connection, workers=DEFAULT_WORKERS, progress=_noop):
         for index, sections in enumerate(pool.map(lambda c: api.admin_sections(*c), crawlable), start=1):
             for section in sections:
                 key = citations.admin_key(section["citation"])
+                appendix = citations.is_admin_appendix(section["section_number"])
                 _upsert_stub(connection, {
                     **section,
                     "citation_key": key,
@@ -341,11 +343,13 @@ def structure_admincode(connection, workers=DEFAULT_WORKERS, progress=_noop):
                                                section["chapter_number"], section["section_number"]),
                     "sort_key": db.sort_key(section["title_number"], section["agency_number"],
                                             section["chapter_number"], section["section_number"]),
+                    "status": "appendix" if appendix else "active",
                 })
-                _enqueue(connection, "admincode", key, {
-                    "title": section["title_number"], "agency": section["agency_number"],
-                    "chapter": section["chapter_number"], "section": section["section_number"],
-                })
+                if not appendix:
+                    _enqueue(connection, "admincode", key, {
+                        "title": section["title_number"], "agency": section["agency_number"],
+                        "chapter": section["chapter_number"], "section": section["section_number"],
+                    })
                 seen += 1
             if index % 50 == 0:
                 connection.commit()
@@ -622,4 +626,57 @@ def reindex(connection, corpus=None, progress=_noop) -> dict:
                 totals["sections"] += 1
             connection.commit()
             progress("reindex", min(start + REINDEX_BATCH, len(ids)), len(ids))
+
+        if name == "admincode":
+            totals["appendices"] = _repair_appendices(connection)
+            _fill_admin_names(connection)
     return totals
+
+
+def _fill_admin_names(connection) -> None:
+    """Copy agency and chapter names onto Administrative Code sections.
+
+    The section listing names only the title, so a regulation would otherwise cite as
+    "Agency 20 > Chapter 20" - true, and useless next to "State Board of Elections >
+    Voter Registration". The names are already in containers; this joins them across.
+    """
+    connection.execute(
+        """UPDATE sections SET agency_name = COALESCE((
+                   SELECT c.name FROM containers c
+                    WHERE c.corpus = 'admincode' AND c.kind = 'agency'
+                      AND c.key = sections.title_number || '/' || sections.agency_number
+               ), agency_name)
+            WHERE corpus = 'admincode' AND agency_number != ''"""
+    )
+    connection.execute(
+        """UPDATE sections SET chapter_name = COALESCE((
+                   SELECT c.name FROM containers c
+                    WHERE c.corpus = 'admincode' AND c.kind = 'chapter'
+                      AND c.key = sections.container_key
+               ), chapter_name)
+            WHERE corpus = 'admincode' AND chapter_number != ''"""
+    )
+    connection.commit()
+
+
+def _repair_appendices(connection) -> int:
+    """Reclassify FORMS/DIBR pseudo-sections on a mirror harvested before they were known.
+
+    They were recorded as failed fetches, which is misleading in two directions: it
+    inflates the error count and it leaves an agent unable to tell an appendix from a
+    section whose text is genuinely missing.
+    """
+    repaired = 0
+    for row in connection.execute(
+        "SELECT id, citation FROM sections WHERE corpus = 'admincode' AND body_text = ''"
+    ).fetchall():
+        if not citations.is_admin_appendix(row["citation"].rsplit("-", 1)[-1]):
+            continue
+        connection.execute("UPDATE sections SET status = 'appendix' WHERE id = ?", (row["id"],))
+        connection.execute(
+            "DELETE FROM harvest_queue WHERE corpus = 'admincode' AND citation_key = ?",
+            (citations.admin_key(row["citation"]),),
+        )
+        repaired += 1
+    connection.commit()
+    return repaired

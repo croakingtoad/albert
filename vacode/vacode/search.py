@@ -393,6 +393,24 @@ def cited_by(connection, citation: str, corpus=None, limit: int = 25):
 # How each corpus names its levels. Without this the Constitution renders as
 # "Title 1 > Chapter 8" when it means "Article I, section 8", and regulations lose the
 # agency that promulgated them.
+# What each non-active status means, in the words a model should pass on to a user.
+STATUS_NOTES = {
+    "repealed": "REPEALED — this is not current law.",
+    "expired": "EXPIRED — this provision is no longer operative.",
+    "reserved": "RESERVED — this number is set aside and carries no text.",
+    "appendix": ("APPENDIX — a chapter's list of forms or documents incorporated by "
+                 "reference. The service publishes no text for it; follow the URL."),
+}
+
+
+def status_note(record):
+    """A one-line explanation of a non-active status, or '' when the section is current."""
+    status = record.get("status", "active")
+    if status == "active":
+        return ""
+    return STATUS_NOTES.get(status, f"{status.upper()} — this is not current law.")
+
+
 PLACE_LABELS = {
     "vacode": [("title_number", "title_name", "Title"),
                ("chapter_number", "chapter_name", "Chapter"),

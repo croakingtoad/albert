@@ -65,9 +65,10 @@ CREATE TABLE IF NOT EXISTS sections (
     body_text       TEXT NOT NULL DEFAULT '',
     history         TEXT NOT NULL DEFAULT '',
     authority       TEXT NOT NULL DEFAULT '',
-    -- 'active' | 'repealed' | 'expired' | 'reserved'. Non-active sections are kept
-    -- and returned: an agent that cannot see that a provision was repealed will
-    -- happily cite it as current law.
+    -- 'active' | 'repealed' | 'expired' | 'reserved' | 'appendix'. Non-active rows are
+    -- kept and returned: an agent that cannot see that a provision was repealed will
+    -- happily cite it as current law. 'appendix' marks the Administrative Code's
+    -- FORMS and DIBR pseudo-sections, which have no retrievable text.
     status          TEXT NOT NULL DEFAULT 'active',
     url             TEXT NOT NULL DEFAULT '',
     title_number    TEXT NOT NULL DEFAULT '',

@@ -114,6 +114,19 @@ def references_in_html(html: str):
     return out
 
 
+# Administrative Code chapters carry two pseudo-sections alongside their real ones:
+# FORMS (a list of the chapter's forms) and DIBR (documents incorporated by reference).
+# They appear in every section listing, but AdministrativeCodeGetSectionDetailsJson
+# takes its section number as three numeric path segments and answers 400 for these -
+# 724 of them across the corpus. They are appendices, not failed fetches.
+APPENDIX_TOKENS = {"forms", "dibr"}
+
+
+def is_admin_appendix(section_number: str) -> bool:
+    """Whether a VAC 'section' is really a chapter appendix with no retrievable text."""
+    return str(section_number or "").strip().lower() in APPENDIX_TOKENS
+
+
 def code_url(citation: str) -> str:
     """The official law.lis.virginia.gov page for a Code section.
 

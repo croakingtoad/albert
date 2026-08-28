@@ -32,17 +32,25 @@ Measured on a full harvest, 28 August 2026:
 | Agencies | — | 152 | — |
 | Chapters | 1,553 | 2,183 | — |
 | Sections | **33,854** | **34,627** | 130 |
-| Repealed / expired / reserved | 2,262 | — | 0 |
-| Cross-references | 39,992 | — | — |
+| Repealed, expired, reserved | 2,262 | 44 | 0 |
+| Chapter appendices (FORMS, DIBR) | — | 724 | — |
+| Cross-references | 39,992 | 10,247 | — |
 | Plain text | 52 MB | — | — |
-| Harvest | 43 min at 12 workers, 0 errors | ~45 min | 11 s |
+| Harvest | 43 min, 0 errors | 38 min, 0 errors | 11 s |
 
 The whole mirror — three corpora, full text, FTS5 index and the reference graph — is
 one 221 MB SQLite file. The Code of Virginia alone is roughly **13 million tokens** of
 text. That is why it lives in an index rather than in a prompt.
 
-99 of the 33,854 sections are known to the chapter listings but not to the detail
-operation — a gap in the source, recorded in the harvest queue rather than papered over.
+130 sections across the two large corpora (99 statutes, 31 regulations) are known to the
+chapter listings but not to the detail operation — a gap in the source, recorded in the
+harvest queue rather than papered over.
+
+Every Administrative Code chapter also lists two pseudo-sections, `FORMS` and `DIBR`
+(documents incorporated by reference), which the detail operation cannot serve because it
+takes numeric path segments. Those 724 are stored as `appendix` rather than counted as
+failures, so an agent can tell a chapter appendix from a section whose text is genuinely
+missing.
 
 ## Install
 

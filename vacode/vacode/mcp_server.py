@@ -150,8 +150,9 @@ def render_section(record, *, body_key="body_text") -> str:
     place = search.describe_place(record)
     if place:
         lines.append(place)
-    if record.get("status", "active") != "active":
-        lines.append(f"STATUS: {record['status'].upper()} — this is not current law.")
+    note = search.status_note(record)
+    if note:
+        lines.append(f"STATUS: {note}")
     body = record.get(body_key) or record.get("snippet") or ""
     if body:
         lines += ["", body]
@@ -159,7 +160,9 @@ def render_section(record, *, body_key="body_text") -> str:
         lines += ["", f"History: {record['history']}"]
     if record.get("references"):
         lines += ["", "Cross-references: " + ", ".join(record["references"][:20])]
-    lines += ["", f"Source: {record.get('url', '')} (retrieved {record.get('retrieved_at', 'unknown')})"]
+    when = record.get("retrieved_at") or ""
+    lines += ["", f"Source: {record.get('url', '')} "
+                  f"({'retrieved ' + when if when else 'text never retrieved'})"]
     return "\n".join(lines)
 
 

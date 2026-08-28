@@ -43,6 +43,38 @@ class TestCitations(unittest.TestCase):
         self.assertEqual(citations.references_in_html(html), ["2.2-4000", "18.2-51"])
 
 
+class TestAdminAppendices(unittest.TestCase):
+    def test_forms_and_dibr_are_appendices_not_sections(self):
+        self.assertTrue(citations.is_admin_appendix("FORMS"))
+        self.assertTrue(citations.is_admin_appendix("dibr"))
+        self.assertFalse(citations.is_admin_appendix("40"))
+        self.assertFalse(citations.is_admin_appendix("10.5"))
+
+    def test_a_mirror_harvested_before_the_rule_is_repaired(self):
+        connection = db.connect(":memory:")
+        connection.execute(
+            """INSERT INTO sections (corpus, citation, citation_key, heading, body_text, status)
+               VALUES ('admincode', '1VAC20-20-FORMS', '1vac20-20-forms', 'FORMS (1VAC20-20)',
+                       '', 'active')""")
+        connection.execute(
+            """INSERT INTO harvest_queue (corpus, citation_key, state, error)
+               VALUES ('admincode', '1vac20-20-forms', 'error', 'HTTP 400')""")
+        connection.commit()
+
+        self.assertEqual(harvest.reindex(connection, "admincode")["appendices"], 1)
+        row = connection.execute("SELECT status FROM sections").fetchone()
+        self.assertEqual(row["status"], "appendix")
+        self.assertIsNone(connection.execute(
+            "SELECT 1 FROM harvest_queue WHERE state = 'error'").fetchone())
+
+    def test_the_appendix_note_does_not_claim_it_was_repealed(self):
+        note = search.status_note({"status": "appendix"})
+        self.assertIn("APPENDIX", note)
+        self.assertNotIn("not current law", note)
+        self.assertIn("not current law", search.status_note({"status": "repealed"}))
+        self.assertEqual(search.status_note({"status": "active"}), "")
+
+
 class TestNormalize(unittest.TestCase):
     BODY = (
         "<p>If any person maliciously shoot, stab, cut, or wound any person, he shall be "
