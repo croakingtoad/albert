@@ -4,3 +4,8 @@ __pycache__/
 *.db-wal
 *.db-shm
 context/
+
+# Build artifacts from `pip install .`
+build/
+dist/
+*.egg-info/
