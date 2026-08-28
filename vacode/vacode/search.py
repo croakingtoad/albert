@@ -168,66 +168,74 @@ def _fts_search(connection, query, corpus, title, status, limit, include_text, s
     return out
 
 
-def toc(connection, corpus="vacode", title=None, chapter=None, *, include_sections=None):
-    """Browse the structure: titles, then chapters, then section headings.
+def toc(connection, corpus="vacode", *path, include_counts=True):
+    """Browse the structure by walking down a path of container numbers.
 
-    Returns the level below whatever was specified, which is what makes this usable as
-    a drill-down: no arguments lists titles, a title lists its chapters, and a title
-    plus chapter lists that chapter's sections.
+    The walk is generic on purpose, because the three corpora are not the same shape:
+    the Code of Virginia nests title > chapter, the Administrative Code nests
+    title > agency > chapter, and the Constitution has only articles. Rather than
+    encode those, this returns whatever children the requested container has, and
+    falls back to that container's sections when it has none.
+
+        toc(c, "vacode")              -> the 76 titles
+        toc(c, "vacode", "18.2")      -> that title's chapters
+        toc(c, "vacode", "18.2", "4") -> that chapter's section headings
+        toc(c, "admincode", "1", "20")-> that agency's chapters
     """
-    if include_sections is None:
-        include_sections = chapter is not None
+    path = [str(part) for part in path if part not in (None, "")]
+    key = "/".join(path)
 
-    if title is None:
-        rows = connection.execute(
-            """SELECT number, name, (SELECT COUNT(*) FROM sections s
-                                      WHERE s.corpus = c.corpus AND s.title_number = c.number) AS sections
-                 FROM containers c WHERE corpus = ? AND kind = 'title' ORDER BY sort_key""",
-            (corpus,),
-        ).fetchall()
-        return {"corpus": corpus, "level": "titles", "items": [_row_to_dict(r) for r in rows]}
+    count_column = (
+        """, (SELECT COUNT(*) FROM sections s
+              WHERE s.corpus = c.corpus
+                AND (s.container_key = c.key OR s.container_key LIKE c.key || '/%')) AS sections"""
+        if include_counts else ", 0 AS sections"
+    )
+    children = connection.execute(
+        f"""SELECT c.kind, c.key, c.number, c.name {count_column}
+              FROM containers c WHERE c.corpus = ? AND c.parent_key = ? ORDER BY c.sort_key""",
+        (corpus, key),
+    ).fetchall()
 
-    title = str(title)
-    if chapter is None:
-        rows = connection.execute(
-            """SELECT number, name, (SELECT COUNT(*) FROM sections s
-                                      WHERE s.corpus = c.corpus AND s.title_number = ?
-                                        AND s.chapter_number = c.number) AS sections
-                 FROM containers c
-                WHERE corpus = ? AND kind = 'chapter' AND parent_key LIKE ?
-                ORDER BY sort_key""",
-            (title, corpus, f"{title}%"),
-        ).fetchall()
-        title_row = connection.execute(
-            "SELECT number, name FROM containers WHERE corpus = ? AND kind = 'title' AND number = ?",
-            (corpus, title),
-        ).fetchone()
-        result = {
-            "corpus": corpus,
-            "level": "chapters",
-            "title": _row_to_dict(title_row) if title_row else {"number": title, "name": ""},
-            "items": [_row_to_dict(r) for r in rows],
-        }
-        if include_sections:
-            result["sections"] = sections_in(connection, corpus, title, None)
+    result = {"corpus": corpus, "path": path, "key": key}
+    if path:
+        result["container"] = _container(connection, corpus, key)
+
+    if children:
+        result["level"] = children[0]["kind"] + "s"
+        result["items"] = [_row_to_dict(row) for row in children]
+        # A container can hold both sub-containers and sections the service never
+        # placed in one - the UCC titles, which are organized into Parts. Those would
+        # otherwise be invisible from every level of the walk.
+        unplaced = sections_in(connection, corpus, key)
+        if unplaced:
+            result["unplaced_sections"] = unplaced
         return result
 
-    return {
-        "corpus": corpus,
-        "level": "sections",
-        "title": {"number": title},
-        "chapter": {"number": str(chapter)},
-        "items": sections_in(connection, corpus, title, str(chapter)),
-    }
+    result["level"] = "sections"
+    result["items"] = sections_in(connection, corpus, key)
+    return result
 
 
-def sections_in(connection, corpus, title, chapter):
-    sql = """SELECT citation, heading, status, article_number, article_name, chapter_number, url
-               FROM sections WHERE corpus = ? AND title_number = ?"""
-    params = [corpus, title]
-    if chapter is not None:
-        sql += " AND chapter_number = ?"
-        params.append(chapter)
+def _container(connection, corpus, key):
+    row = connection.execute(
+        "SELECT kind, key, number, name FROM containers WHERE corpus = ? AND key = ?",
+        (corpus, key),
+    ).fetchone()
+    return _row_to_dict(row) if row else {"key": key, "number": key.split("/")[-1], "name": ""}
+
+
+def sections_in(connection, corpus, container_key, *, descendants=False):
+    """The sections filed directly under one container (or under it and everything below)."""
+    sql = """SELECT citation, citation_key, heading, status, chapter_number, chapter_name,
+                    article_number, article_name, part_number, part_name, url, container_key
+               FROM sections WHERE corpus = ? AND """
+    if descendants and container_key:
+        sql += "(container_key = ? OR container_key LIKE ? || '/%')"
+        params = [corpus, container_key, container_key]
+    else:
+        sql += "container_key = ?"
+        params = [corpus, container_key]
     sql += " ORDER BY sort_key"
     return [_row_to_dict(r) for r in connection.execute(sql, params)]
 
@@ -235,44 +243,54 @@ def sections_in(connection, corpus, title, chapter):
 def neighbors(connection, citation: str, corpus=None, span: int = 2):
     """The sections immediately before and after one section, in codified order.
 
-    Legal text is contextual: the definition that controls a provision is usually the
-    section next to it, and an agent that can only fetch exact citations never sees it.
+    Legal text is contextual: the definition or exception that controls a provision is
+    usually the section next to it, and an agent that can only fetch exact citations
+    never sees it. Ordering uses the stored sort key rather than a recomputed one, so
+    sections the service files outside a chapter still sit in the right place.
     """
-    row = get(connection, citation, corpus, include_text=False)
-    if not row:
+    key = citations.normalize_key(citation) or citations.clean(citation).lower()
+    sql = "SELECT corpus, container_key, sort_key FROM sections WHERE citation_key = ?"
+    params = [key]
+    if corpus:
+        sql += " AND corpus = ?"
+        params.append(corpus)
+    anchor = connection.execute(sql + " LIMIT 1", params).fetchone()
+    if not anchor:
         return []
+
+    scope = (anchor["corpus"], anchor["container_key"], anchor["sort_key"], span)
     before = connection.execute(
         """SELECT citation, heading, status FROM sections
-            WHERE corpus = ? AND title_number = ? AND chapter_number = ? AND sort_key < ?
-            ORDER BY sort_key DESC LIMIT ?""",
-        (row["corpus"], row["title_number"], row["chapter_number"],
-         db.sort_key(row["title_number"], row["chapter_number"], row["citation"]), span),
-    ).fetchall()
+            WHERE corpus = ? AND container_key = ? AND sort_key < ?
+            ORDER BY sort_key DESC LIMIT ?""", scope).fetchall()
     after = connection.execute(
         """SELECT citation, heading, status FROM sections
-            WHERE corpus = ? AND title_number = ? AND chapter_number = ? AND sort_key > ?
-            ORDER BY sort_key LIMIT ?""",
-        (row["corpus"], row["title_number"], row["chapter_number"],
-         db.sort_key(row["title_number"], row["chapter_number"], row["citation"]), span),
-    ).fetchall()
+            WHERE corpus = ? AND container_key = ? AND sort_key > ?
+            ORDER BY sort_key LIMIT ?""", scope).fetchall()
     return [_row_to_dict(r) for r in reversed(before)] + [_row_to_dict(r) for r in after]
 
 
-def cited_by(connection, citation: str, limit: int = 25):
+def cited_by(connection, citation: str, corpus=None, limit: int = 25):
     """Sections whose text links to this one.
 
-    Cross-references are read from the anchors the service embeds in section bodies,
-    which is far more reliable than parsing the prose around them.
+    Read from the stored cross-reference graph, which is built out of the anchors the
+    service embeds in section bodies - far more reliable than parsing the prose, and an
+    index lookup rather than a scan of every body in the corpus.
     """
     key = citations.normalize_key(citation) or citations.clean(citation).lower()
     if not key:
         return []
-    rows = connection.execute(
-        """SELECT citation, heading, status, url FROM sections
-            WHERE body_html LIKE ? ORDER BY sort_key LIMIT ?""",
-        (f"%/vacode/{key}/%", limit),
-    ).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    sql = """SELECT s.citation, s.heading, s.status, s.url
+               FROM refs r JOIN sections s
+                 ON s.corpus = r.corpus AND s.citation_key = r.from_key
+              WHERE r.to_key = ?"""
+    params = [key]
+    if corpus:
+        sql += " AND r.corpus = ?"
+        params.append(corpus)
+    sql += " ORDER BY s.sort_key LIMIT ?"
+    params.append(limit)
+    return [_row_to_dict(r) for r in connection.execute(sql, params)]
 
 
 def stats(connection, path=None):

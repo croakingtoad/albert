@@ -16,7 +16,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Bumping this invalidates stored bodies on the next harvest even when the upstream
 # text is unchanged, which is how a normalizer fix gets re-applied to the whole mirror.
@@ -84,6 +84,10 @@ CREATE TABLE IF NOT EXISTS sections (
     subtitle_name   TEXT NOT NULL DEFAULT '',
     subpart_number  TEXT NOT NULL DEFAULT '',
     subpart_name    TEXT NOT NULL DEFAULT '',
+    -- The containers row this section belongs to ('18.2/4', '1/20/10', '1'), which is
+    -- what makes the table of contents an exact join instead of a prefix match. Empty
+    -- for a section the service never placed in a chapter.
+    container_key   TEXT NOT NULL DEFAULT '',
     sort_key        TEXT NOT NULL DEFAULT '',
     body_hash       TEXT NOT NULL DEFAULT '',
     retrieved_at    TEXT NOT NULL DEFAULT '',
@@ -92,6 +96,17 @@ CREATE TABLE IF NOT EXISTS sections (
 CREATE INDEX IF NOT EXISTS sections_by_place ON sections (corpus, title_number, chapter_number, sort_key);
 CREATE INDEX IF NOT EXISTS sections_by_key ON sections (citation_key);
 CREATE INDEX IF NOT EXISTS sections_by_status ON sections (corpus, status);
+CREATE INDEX IF NOT EXISTS sections_by_container ON sections (corpus, container_key, sort_key);
+
+-- The cross-reference graph, read out of the anchors the service embeds in section
+-- bodies. Stored rather than scanned so 'what cites this?' is an index lookup.
+CREATE TABLE IF NOT EXISTS refs (
+    corpus   TEXT NOT NULL,
+    from_key TEXT NOT NULL,
+    to_key   TEXT NOT NULL,
+    PRIMARY KEY (corpus, from_key, to_key)
+);
+CREATE INDEX IF NOT EXISTS refs_inbound ON refs (to_key);
 
 -- Work queue for the harvester: one row per section the structure crawl found, so a
 -- text harvest can be interrupted and resumed without re-walking the tree.
@@ -162,9 +177,26 @@ def connect(path=None, *, read_only: bool = False) -> sqlite3.Connection:
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA synchronous = NORMAL")
         connection.executescript(SCHEMA)
+        _migrate(connection)
         set_meta(connection, "schema_version", str(SCHEMA_VERSION))
         connection.commit()
     return connection
+
+
+# Columns added after the first release. CREATE TABLE IF NOT EXISTS will not add a
+# column to a table that already exists, so each one is applied explicitly against
+# databases harvested by an earlier version rather than forcing a re-harvest.
+_ADDED_COLUMNS = {
+    "sections": {"container_key": "TEXT NOT NULL DEFAULT ''"},
+}
+
+
+def _migrate(connection: sqlite3.Connection) -> None:
+    for table, columns in _ADDED_COLUMNS.items():
+        existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for name, definition in columns.items():
+            if name not in existing:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
 
 def get_meta(connection: sqlite3.Connection, key: str, default=None):

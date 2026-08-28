@@ -110,19 +110,22 @@ def cmd_search(args):
 
 def cmd_toc(args):
     connection = _connect(args)
-    listing = search.toc(connection, args.corpus, args.title, args.chapter)
+    listing = search.toc(connection, args.corpus, *args.path)
     def render(data):
-        if data["level"] == "titles":
-            for item in data["items"]:
-                print(f"{item['number']:<8} {item['name']}  ({item['sections']} sections)")
-        elif data["level"] == "chapters":
-            print(f"Title {data['title']['number']}. {data['title']['name']}\n")
-            for item in data["items"]:
-                print(f"  Chapter {item['number']:<8} {item['name']}  ({item['sections']})")
-        else:
+        if data.get("container"):
+            container = data["container"]
+            print(f"{container.get('kind', 'container').title()} {container['number']}. "
+                  f"{container['name']}".rstrip(". ") + "\n")
+        if data["level"] == "sections":
             for item in data["items"]:
                 flag = "" if item["status"] == "active" else f"  [{item['status']}]"
-                print(f"  § {item['citation']:<14} {item['heading']}{flag}")
+                print(f"  § {item['citation']:<16} {item['heading']}{flag}")
+            return
+        label = data["level"].rstrip("s").title()
+        for item in data["items"]:
+            print(f"  {label} {item['number']:<10} {item['name']}  ({item['sections']} sections)")
+        for item in data.get("unplaced_sections") or []:
+            print(f"  § {item['citation']:<16} {item['heading']}")
     _emit(args, listing, render)
     return 0
 
@@ -139,7 +142,7 @@ def cmd_neighbors(args):
 
 def cmd_cited_by(args):
     connection = _connect(args)
-    rows = search.cited_by(connection, args.citation, args.limit)
+    rows = search.cited_by(connection, args.citation, args.corpus, args.limit)
     _emit(args, rows, lambda items: [print(f"§ {i['citation']:<14} {i['heading']}") for i in items])
     return 0
 
@@ -163,6 +166,13 @@ def cmd_export_context(args):
     connection = _connect(args)
     result = toc.export(connection, args.directory, args.corpus)
     _emit(args, result, lambda r: print(f"wrote {r['titles']} title files to {r['directory']}"))
+    return 0
+
+
+def cmd_reindex(args):
+    connection = _connect(args, write=True)
+    totals = harvest.reindex(connection, args.corpus, progress=_progress)
+    _emit(args, totals, lambda t: print(f"reindexed {t['sections']} sections, {t['refs']} references"))
     return 0
 
 
@@ -207,9 +217,12 @@ def build_parser():
                    help="also return repealed, expired and reserved sections")
     p.set_defaults(func=cmd_search)
 
-    p = subparsers.add_parser("toc", help="browse titles, chapters and section headings")
-    p.add_argument("title", nargs="?")
-    p.add_argument("chapter", nargs="?")
+    p = subparsers.add_parser(
+        "toc", help="browse the structure",
+        description="With no path, lists titles. Each further element walks one level down: "
+                    "'toc 18.2' lists that title's chapters, 'toc 18.2 4' lists that chapter's "
+                    "sections, 'toc --corpus admincode 1 20' lists that agency's chapters.")
+    p.add_argument("path", nargs="*", help="container numbers, outermost first")
     p.add_argument("--corpus", default="vacode", choices=db.CORPORA)
     p.set_defaults(func=cmd_toc)
 
@@ -221,8 +234,16 @@ def build_parser():
 
     p = subparsers.add_parser("cited-by", help="sections whose text links to this one")
     p.add_argument("citation")
+    p.add_argument("--corpus", choices=db.CORPORA)
     p.add_argument("--limit", type=int, default=25)
     p.set_defaults(func=cmd_cited_by)
+
+    p = subparsers.add_parser(
+        "reindex", help="recompute derived data (container keys, sort keys, the reference graph)",
+        description="Everything it rebuilds is derived from text already harvested, so this "
+                    "never touches the network.")
+    p.add_argument("--corpus", choices=db.CORPORA)
+    p.set_defaults(func=cmd_reindex)
 
     p = subparsers.add_parser("status", help="what the mirror holds and when it was refreshed")
     p.set_defaults(func=cmd_status)

@@ -90,17 +90,21 @@ TOOLS = [
     {
         "name": "browse_virginia_law",
         "description": (
-            "Walk the structure. With no arguments it lists every title; with a title it lists "
-            "that title's chapters; with a title and chapter it lists that chapter's section "
-            "headings. Use it to find the right corner of the law before searching, or to see "
-            "what else a chapter contains."
+            "Walk the structure of the law. With no arguments it lists every title; add a "
+            "`path` to walk down one level at a time - ['18.2'] lists that title's chapters, "
+            "['18.2','4'] lists that chapter's section headings. For regulations the path is "
+            "title, agency, chapter. Use it to find the right corner of the law before "
+            "searching, or to see what else a chapter contains."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "corpus": {"type": "string", "enum": CORPUS_ENUM, "default": "vacode"},
-                "title": {"type": "string", "description": "Title number, e.g. '18.2'."},
-                "chapter": {"type": "string", "description": "Chapter number within that title."},
+                "path": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Container numbers, outermost first, e.g. ['18.2'] or ['18.2','4'].",
+                },
             },
         },
     },
@@ -193,26 +197,38 @@ def _tool_get(connection, arguments):
 
 
 def _tool_browse(connection, arguments):
-    listing = search.toc(connection, arguments.get("corpus") or "vacode",
-                         arguments.get("title"), arguments.get("chapter"))
-    if listing["level"] == "titles":
-        lines = [f"{len(listing['items'])} titles:"]
-        lines += [f"  {i['number']:<8} {i['name']} ({i['sections']} sections)" for i in listing["items"]]
-        return "\n".join(lines)
-    if listing["level"] == "chapters":
-        title = listing["title"]
-        lines = [f"Title {title['number']}. {title['name']} — {len(listing['items'])} chapters:"]
-        lines += [f"  Chapter {i['number']:<8} {i['name']} ({i['sections']} sections)" for i in listing["items"]]
-        if listing.get("sections"):
-            unplaced = [s for s in listing["sections"] if not s["chapter_number"]]
-            if unplaced:
-                lines.append("  Sections not assigned to a chapter:")
-                lines += [f"    § {s['citation']} — {s['heading']}" for s in unplaced]
-        return "\n".join(lines)
-    lines = [f"Title {listing['title']['number']}, Chapter {listing['chapter']['number']}:"]
-    for item in listing["items"]:
-        flag = "" if item["status"] == "active" else f"  [{item['status']}]"
-        lines.append(f"  § {item['citation']} — {item['heading']}{flag}")
+    corpus = arguments.get("corpus") or "vacode"
+    path = arguments.get("path") or []
+    if isinstance(path, str):
+        path = [path]
+    # Older callers, and models that pattern-match on the CLI, may send title/chapter
+    # instead of a path; accepting both costs one line and avoids a useless tool error.
+    if not path:
+        path = [p for p in (arguments.get("title"), arguments.get("agency"),
+                            arguments.get("chapter")) if p]
+
+    listing = search.toc(connection, corpus, *path)
+    header = ""
+    if listing.get("container"):
+        container = listing["container"]
+        header = (f"{container.get('kind', 'container').title()} {container['number']}. "
+                  f"{container['name']}").rstrip(". ")
+
+    lines = [header] if header else []
+    if listing["level"] == "sections":
+        lines.append(f"{len(listing['items'])} sections:")
+        for item in listing["items"]:
+            flag = "" if item["status"] == "active" else f"  [{item['status']}]"
+            lines.append(f"  § {item['citation']} — {item['heading']}{flag}")
+    else:
+        label = listing["level"].rstrip("s")
+        lines.append(f"{len(listing['items'])} {listing['level']}:")
+        for item in listing["items"]:
+            lines.append(f"  {label} {item['number']}: {item['name']} ({item['sections']} sections)")
+        for item in listing.get("unplaced_sections") or []:
+            lines.append(f"  § {item['citation']} — {item['heading']}")
+    if not listing["items"] and not listing.get("unplaced_sections"):
+        lines.append("Nothing at that path. Call this tool with no arguments to see the titles.")
     return "\n".join(lines)
 
 

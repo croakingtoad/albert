@@ -54,8 +54,26 @@ def _upsert_container(connection, corpus, kind, key, number, name, parent_key, s
     )
 
 
+def container_key_for(corpus: str, row) -> str:
+    """The containers key a section belongs under.
+
+    Each corpus nests differently - the Code by chapter, the Administrative Code by
+    agency then chapter, the Constitution by article - and collapsing that into one
+    key is what lets the table-of-contents walk stay corpus-agnostic. A Code section
+    the service never placed in a chapter (the UCC titles) keys to its title.
+    """
+    get = row.get if hasattr(row, "get") else (lambda k, d="": row[k] if k in row.keys() else d)
+    title = get("title_number", "") or ""
+    if corpus == "admincode":
+        return "/".join(p for p in (title, get("agency_number", ""), get("chapter_number", "")) if p)
+    if corpus == "constitution":
+        return title
+    chapter = get("chapter_number", "") or ""
+    return f"{title}/{chapter}" if chapter else title
+
+
 _STUB_COLUMNS = (
-    "corpus", "citation", "citation_key", "heading", "url", "sort_key",
+    "corpus", "citation", "citation_key", "heading", "url", "sort_key", "container_key",
     "title_number", "title_name", "agency_number", "agency_name",
     "chapter_number", "chapter_name", "article_number", "article_name",
     "part_number", "part_name", "subtitle_number", "subtitle_name",
@@ -64,6 +82,8 @@ _STUB_COLUMNS = (
 
 
 def _upsert_stub(connection, values: dict):
+    values = dict(values)
+    values.setdefault("container_key", container_key_for(values["corpus"], values))
     """Write the structural facts about a section without touching its text.
 
     Structure and body are updated independently so that re-running the (cheap) tree
@@ -526,8 +546,55 @@ def harvest(connection, corpus="vacode", workers=DEFAULT_WORKERS, *, skip_struct
     stats["structure_sections"] = found
     stats["seconds"] = round(time.time() - started, 1)
 
+    reindex(connection, corpus, progress=progress)
     db.set_meta(connection, f"harvested_at:{corpus}", _now())
     db.set_meta(connection, f"harvest_source:{corpus}", api.API_BASE)
     db.set_meta(connection, "normalizer_version", str(db.NORMALIZER_VERSION))
     connection.commit()
     return stats
+
+
+def reindex(connection, corpus=None, progress=_noop) -> dict:
+    """Recompute derived data - container keys, sort keys, and the reference graph.
+
+    Everything here is derivable from what the harvest already stored, so this is safe
+    to run at any time and is how a mirror built by an older version picks up a change
+    to the derivation rules without re-crawling 33,000 sections.
+    """
+    corpora = [corpus] if corpus else list(db.CORPORA)
+    totals = {"sections": 0, "refs": 0}
+    for name in corpora:
+        rows = connection.execute(
+            """SELECT id, corpus, citation, citation_key, title_number, agency_number,
+                      chapter_number, part_number, body_html
+                 FROM sections WHERE corpus = ?""",
+            (name,),
+        ).fetchall()
+        if not rows:
+            continue
+        connection.execute("DELETE FROM refs WHERE corpus = ?", (name,))
+        for index, row in enumerate(rows, start=1):
+            key = container_key_for(name, row)
+            connection.execute(
+                "UPDATE sections SET container_key = ?, sort_key = ? WHERE id = ?",
+                (key,
+                 db.sort_key(row["title_number"],
+                             row["chapter_number"] or row["part_number"] or "",
+                             row["citation"]),
+                 row["id"]),
+            )
+            for target in citations.references_in_html(row["body_html"]):
+                if target == row["citation_key"]:
+                    continue  # a section quoting its own number is not a reference
+                connection.execute(
+                    "INSERT OR IGNORE INTO refs (corpus, from_key, to_key) VALUES (?, ?, ?)",
+                    (name, row["citation_key"], target),
+                )
+                totals["refs"] += 1
+            totals["sections"] += 1
+            if index % 2000 == 0:
+                connection.commit()
+                progress("reindex", index, len(rows))
+        connection.commit()
+        progress("reindex", len(rows), len(rows))
+    return totals

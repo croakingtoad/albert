@@ -62,41 +62,43 @@ def tier0(connection, corpus: str = "vacode") -> str:
 def tier1(connection, corpus: str, title_number: str) -> str:
     """One title's chapters, articles and section headings."""
     listing = search.toc(connection, corpus, title_number)
-    title = listing["title"]
+    container = listing.get("container") or {"number": title_number, "name": ""}
     lines = [
-        f"# {CORPUS_TITLES.get(corpus, corpus)} - Title {title['number']}. {title['name']}".rstrip(". "),
+        f"# {CORPUS_TITLES.get(corpus, corpus)} — Title {container['number']}. {container['name']}".rstrip(". "),
         "",
         f"Harvested {_stamp(connection, corpus)}.",
         "",
     ]
-    for chapter in listing["items"]:
-        lines.append(f"## Chapter {chapter['number']}. {chapter['name']}".rstrip(". "))
-        lines.append("")
-        sections = search.sections_in(connection, corpus, str(title_number), chapter["number"])
-        current_article = None
-        for section in sections:
-            article = (section["article_number"], section["article_name"])
-            if article != current_article and any(article):
-                lines.append(f"### Article {article[0]}. {article[1]}".rstrip(". "))
-                lines.append("")
-                current_article = article
-            flag = "" if section["status"] == "active" else f" [{section['status']}]"
-            lines.append(f"- § {section['citation']} — {section['heading']}{flag}")
-        lines.append("")
 
-    # Sections the service never placed in a chapter (the UCC titles, which are
-    # organized by Part) would otherwise be missing from their own title's map.
-    orphans = [s for s in search.sections_in(connection, corpus, str(title_number), None)
-               if not s["chapter_number"]]
-    if orphans:
-        lines += ["## Sections not assigned to a chapter", ""]
-        for section in orphans:
-            flag = "" if section["status"] == "active" else f" [{section['status']}]"
-            lines.append(f"- § {section['citation']} — {section['heading']}{flag}")
-        lines.append("")
+    if listing["level"] == "sections":
+        # A title the service never divided into chapters - the UCC titles, which are
+        # organized into Parts and reached by enumeration rather than by chapter.
+        lines += _section_lines(listing["items"])
+    else:
+        for chapter in listing["items"]:
+            lines.append(f"## Chapter {chapter['number']}. {chapter['name']}".rstrip(". "))
+            lines.append("")
+            lines += _section_lines(search.sections_in(connection, corpus, chapter["key"]))
+            lines.append("")
+        unplaced = listing.get("unplaced_sections") or []
+        if unplaced:
+            lines += ["## Sections not assigned to a chapter", ""] + _section_lines(unplaced) + [""]
 
-    lines += [SOURCE_NOTE, ""]
+    lines += ["", SOURCE_NOTE, ""]
     return "\n".join(lines)
+
+
+def _section_lines(sections):
+    """Section headings, grouped under their article heading where the service gives one."""
+    lines, current_article = [], None
+    for section in sections:
+        article = (section.get("article_number", ""), section.get("article_name", ""))
+        if article != current_article and any(article):
+            lines += [f"### Article {article[0]}. {article[1]}".rstrip(". "), ""]
+            current_article = article
+        flag = "" if section["status"] == "active" else f" [{section['status']}]"
+        lines.append(f"- § {section['citation']} — {section['heading']}{flag}")
+    return lines
 
 
 def export(connection, directory, corpus: str = "vacode") -> dict:

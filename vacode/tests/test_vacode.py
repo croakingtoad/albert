@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from vacode import citations, db, mcp_server, normalize, search  # noqa: E402
+from vacode import citations, db, harvest, mcp_server, normalize, search  # noqa: E402
 
 
 class TestCitations(unittest.TestCase):
@@ -124,7 +124,23 @@ def _fixture(path=":memory:"):
         (db.sort_key("18.2", "4"),),
     )
     connection.commit()
+    # Deriving container keys and the reference graph the same way a real harvest does
+    # keeps the fixture honest: a bug in that derivation fails these tests too.
+    harvest.reindex(connection)
     return connection
+
+
+class TestContainerKeys(unittest.TestCase):
+    def test_each_corpus_nests_differently(self):
+        self.assertEqual(harvest.container_key_for(
+            "vacode", {"title_number": "18.2", "chapter_number": "4"}), "18.2/4")
+        self.assertEqual(harvest.container_key_for(
+            "vacode", {"title_number": "8.2", "chapter_number": ""}), "8.2")
+        self.assertEqual(harvest.container_key_for(
+            "admincode", {"title_number": "1", "agency_number": "20", "chapter_number": "10"}),
+            "1/20/10")
+        self.assertEqual(harvest.container_key_for(
+            "constitution", {"title_number": "1", "chapter_number": "8"}), "1")
 
 
 class TestSearch(unittest.TestCase):
@@ -171,19 +187,43 @@ class TestSearch(unittest.TestCase):
         for query in ['felony OR "', "felony AND NOT", "felony*(", 'he said "felony"']:
             search.search(self.connection, query)  # must not raise
 
-    def test_toc_levels(self):
+    def test_toc_walks_one_level_at_a_time(self):
         titles = search.toc(self.connection, "vacode")
         self.assertEqual(titles["level"], "titles")
         self.assertEqual(titles["items"][0]["number"], "18.2")
+        self.assertEqual(titles["items"][0]["sections"], 3)
         chapters = search.toc(self.connection, "vacode", "18.2")
         self.assertEqual(chapters["level"], "chapters")
+        self.assertEqual([c["number"] for c in chapters["items"]], ["4"])
         sections = search.toc(self.connection, "vacode", "18.2", "4")
         self.assertEqual([s["citation"] for s in sections["items"]],
                          ["18.2-51", "18.2-52", "18.2-64"])
 
+    def test_toc_matches_a_title_exactly_not_by_prefix(self):
+        # Title '1' must not pick up the chapters of 10.1, 18.2 and every other title
+        # whose number happens to start with a 1.
+        self.connection.execute(
+            "INSERT INTO containers (corpus, kind, key, number, name, parent_key, sort_key) "
+            "VALUES ('vacode', 'title', '1', '1', 'General Provisions', '', '1')")
+        self.connection.commit()
+        self.assertEqual(search.toc(self.connection, "vacode", "1")["items"], [])
+
+    def test_toc_of_an_unknown_path_is_empty_not_an_error(self):
+        listing = search.toc(self.connection, "vacode", "99.9", "1")
+        self.assertEqual(listing["items"], [])
+
     def test_neighbors_and_cited_by(self):
         around = search.neighbors(self.connection, "18.2-52", span=1)
         self.assertEqual([r["citation"] for r in around], ["18.2-51", "18.2-64"])
+        self.assertEqual([r["citation"] for r in search.cited_by(self.connection, "18.2-52")],
+                         ["18.2-51"])
+        self.assertEqual(search.neighbors(self.connection, "99.9-9999"), [])
+        self.assertEqual(search.cited_by(self.connection, "99.9-9999"), [])
+
+    def test_reindex_is_idempotent(self):
+        first = harvest.reindex(self.connection)
+        second = harvest.reindex(self.connection)
+        self.assertEqual(first, second)
         self.assertEqual([r["citation"] for r in search.cited_by(self.connection, "18.2-52")],
                          ["18.2-51"])
 
@@ -215,6 +255,18 @@ class TestMcpServer(unittest.TestCase):
             self.assertIn("name", tool)
             self.assertIn("description", tool)
             self.assertEqual(tool["inputSchema"]["type"], "object")
+
+    def test_browse_accepts_a_path(self):
+        response = self._call("tools/call", {"name": "browse_virginia_law",
+                                             "arguments": {"path": ["18.2", "4"]}})
+        text = response["result"]["content"][0]["text"]
+        self.assertIn("18.2-51", text)
+        self.assertIn("Chapter 4", text)
+
+    def test_browse_also_accepts_title_and_chapter(self):
+        response = self._call("tools/call", {"name": "browse_virginia_law",
+                                             "arguments": {"title": "18.2", "chapter": "4"}})
+        self.assertIn("18.2-51", response["result"]["content"][0]["text"])
 
     def test_tool_call_returns_text_content(self):
         response = self._call("tools/call", {"name": "get_virginia_law_section",
