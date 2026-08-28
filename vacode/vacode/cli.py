@@ -12,7 +12,7 @@ import argparse
 import json
 import sys
 
-from . import db, harvest, search, toc
+from . import db, embed, harvest, search, toc
 
 
 def _progress(stage, done, total):
@@ -92,11 +92,17 @@ def cmd_get(args):
 
 def cmd_search(args):
     connection = _connect(args)
-    results = search.search(
-        connection, args.query, corpus=args.corpus, title=args.title,
-        status=None if args.include_inactive else "active",
-        limit=args.limit, include_text=args.full,
-    )
+    try:
+        results = search.search(
+            connection, args.query, corpus=args.corpus, title=args.title,
+            status=None if args.include_inactive else "active",
+            limit=args.limit, include_text=args.full, mode=args.mode,
+        )
+    except embed.EmbeddingError as exc:
+        print(f"vacode search: {exc}", file=sys.stderr)
+        print("(use --mode text for keyword search without a provider)", file=sys.stderr)
+        return 2
+
     def render(rows):
         if not rows:
             print("no results", file=sys.stderr)
@@ -104,6 +110,7 @@ def cmd_search(args):
         for index, row in enumerate(rows, start=1):
             print(f"{index}. " + _format_section(row, full=args.full).replace("\n", "\n   "))
             print()
+
     _emit(args, results, render)
     return 0 if results else 1
 
@@ -176,6 +183,21 @@ def cmd_reindex(args):
     return 0
 
 
+def cmd_embed(args):
+    connection = _connect(args, write=True)
+    if args.rebuild:
+        connection.executescript(embed.EMBEDDINGS_SCHEMA)
+        connection.execute("DELETE FROM embeddings")
+        connection.commit()
+    try:
+        totals = embed.build(connection, args.corpus, limit=args.limit, progress=_progress)
+    except embed.EmbeddingError as exc:
+        print(f"vacode embed: {exc}", file=sys.stderr)
+        return 2
+    _emit(args, totals, lambda t: print(f"embedded {t['sections']} sections in {t['chunks']} chunks"))
+    return 0
+
+
 def cmd_mcp(args):
     from . import mcp_server
     return mcp_server.serve(args.db)
@@ -215,6 +237,9 @@ def build_parser():
     p.add_argument("--full", action="store_true", help="return whole sections instead of snippets")
     p.add_argument("--include-inactive", action="store_true",
                    help="also return repealed, expired and reserved sections")
+    p.add_argument("--mode", default="auto", choices=["auto", "text", "semantic", "hybrid"],
+                   help="ranker: text is BM25, semantic needs 'vacode embed', "
+                        "auto (default) uses both when a semantic index exists")
     p.set_defaults(func=cmd_search)
 
     p = subparsers.add_parser(
@@ -252,6 +277,16 @@ def build_parser():
     p.add_argument("directory")
     p.add_argument("--corpus", default="vacode", choices=db.CORPORA)
     p.set_defaults(func=cmd_export_context)
+
+    p = subparsers.add_parser(
+        "embed", help="build the optional semantic index",
+        description="Needs numpy and an embedding provider (VACODE_EMBED_PROVIDER, "
+                    "VACODE_EMBED_MODEL, VACODE_EMBED_API_KEY). Resumable, and a re-run "
+                    "after a refresh only embeds sections whose text changed.")
+    p.add_argument("--corpus", choices=db.CORPORA)
+    p.add_argument("--limit", type=int, help="stop after this many sections")
+    p.add_argument("--rebuild", action="store_true", help="discard existing vectors first")
+    p.set_defaults(func=cmd_embed)
 
     p = subparsers.add_parser("mcp", help="serve the mirror over MCP on stdio")
     p.set_defaults(func=cmd_mcp)

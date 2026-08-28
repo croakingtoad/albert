@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from vacode import citations, db, harvest, mcp_server, normalize, search  # noqa: E402
+from vacode import citations, db, embed, harvest, mcp_server, normalize, search  # noqa: E402
 
 
 class TestCitations(unittest.TestCase):
@@ -262,6 +262,95 @@ class TestSchemaGuard(unittest.TestCase):
             connection = db.connect(path)
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(sections)")}
             self.assertIn("container_key", columns)
+
+
+# A deterministic stand-in for an embedding provider: one dimension per keyword, so
+# similarity is predictable and the tests never touch the network.
+FAKE_VOCABULARY = ("caustic", "acid", "burn", "shoot", "stab", "wound", "criminal", "accusation")
+
+
+def fake_embedder(texts):
+    vectors = []
+    for text in texts:
+        lowered = text.lower()
+        vector = [float(lowered.count(word)) for word in FAKE_VOCABULARY]
+        if not any(vector):
+            vector[0] = 0.001  # a zero vector cannot be normalized
+        vectors.append(vector)
+    return vectors
+
+
+@unittest.skipIf(embed.numpy_or_none() is None, "semantic search needs numpy")
+class TestSemanticSearch(unittest.TestCase):
+    def setUp(self):
+        self.connection = _fixture()
+        embed.build(self.connection, embedder=fake_embedder, config={"model": "fake"})
+
+    def test_index_is_built_and_detected(self):
+        self.assertTrue(embed.is_available(self.connection))
+        self.assertEqual(db.get_meta(self.connection, "embedding_model"), "fake")
+
+    def test_rebuilding_skips_unchanged_sections(self):
+        again = embed.build(self.connection, embedder=fake_embedder, config={"model": "fake"})
+        self.assertEqual(again["sections"], 0)
+
+    def test_nearest_ranks_by_meaning_not_words(self):
+        ranked = embed.nearest(self.connection, "acid burns caustic", limit=3,
+                               embedder=fake_embedder)
+        top = self.connection.execute(
+            "SELECT citation FROM sections WHERE id = ?", (ranked[0][0],)).fetchone()
+        self.assertEqual(top["citation"], "18.2-52")
+
+    def test_semantic_mode_returns_records(self):
+        results = search._semantic_search(self.connection, "caustic", None, None, "active",
+                                          5, False, 320, embedder=fake_embedder)
+        self.assertTrue(results)
+        self.assertEqual(results[0]["match"], "semantic")
+        self.assertEqual(results[0]["citation"], "18.2-52")
+
+    def test_auto_mode_uses_the_semantic_index_when_one_exists(self):
+        self.assertTrue(embed.is_available(self.connection))
+        # No provider is configured in the test environment, so the hybrid path must
+        # fall back to text rather than raising.
+        results = search.search(self.connection, "caustic substance", mode="auto")
+        self.assertEqual(results[0]["citation"], "18.2-52")
+
+    def test_hybrid_mode_fuses_both_rankers(self):
+        results = search._hybrid_search(self.connection, "caustic substance", None, None,
+                                        "active", 5, False, 320, embedder=fake_embedder)
+        self.assertEqual(results[0]["citation"], "18.2-52")
+        self.assertEqual(results[0]["match"], "hybrid")
+
+    def test_hybrid_degrades_to_text_when_the_provider_fails(self):
+        def broken(_texts):
+            raise embed.EmbeddingError("no API key")
+        results = search._hybrid_search(self.connection, "caustic substance", None, None,
+                                        "active", 5, False, 320, embedder=broken)
+        self.assertEqual(results[0]["citation"], "18.2-52")
+        self.assertEqual(results[0]["match"], "text")
+
+    def test_a_changed_embedding_model_is_reported_not_silently_wrong(self):
+        def wider(texts):
+            return [[1.0] * 32 for _ in texts]
+        with self.assertRaises(embed.EmbeddingError) as caught:
+            embed.nearest(self.connection, "anything", embedder=wider)
+        self.assertIn("dimensions", str(caught.exception))
+
+
+class TestEmbeddingChunks(unittest.TestCase):
+    def test_a_short_section_is_one_chunk_carrying_its_heading(self):
+        pieces = embed.chunks("Definitions", "Short body.")
+        self.assertEqual(pieces, ["Definitions\n\nShort body."])
+
+    def test_a_long_section_splits_on_paragraphs_and_repeats_the_heading(self):
+        body = "\n\n".join(f"Paragraph {i}. " + "word " * 60 for i in range(12))
+        pieces = embed.chunks("Heading", body)
+        self.assertGreater(len(pieces), 1)
+        self.assertTrue(all(piece.startswith("Heading") for piece in pieces))
+        self.assertTrue(all(len(piece) < embed.CHUNK_CHARS * 2 for piece in pieces))
+
+    def test_an_empty_body_yields_nothing_to_embed(self):
+        self.assertEqual(embed.chunks("", ""), [])
 
 
 class TestMcpServer(unittest.TestCase):

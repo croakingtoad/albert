@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 import sqlite3
 
-from . import citations, db, normalize
+from . import citations, db, embed, normalize
 
 # bm25 column weights, in the order the FTS table declares them: citation, heading,
 # body. A heading hit is worth roughly four body hits; a citation hit dominates.
@@ -89,12 +89,24 @@ def get(connection, citation: str, corpus: str | None = None, *, include_text: b
     return record
 
 
+# Reciprocal rank fusion: each ranker contributes 1/(RRF_K + rank), so a section both
+# rankers like beats one that either loves alone. The constant damps the top of each
+# list enough that a single ranker cannot dominate the merge.
+RRF_K = 60
+
+
 def search(connection, query: str, *, corpus=None, title=None, status="active",
-           limit: int = 10, include_text: bool = False, snippet_width: int = 320):
-    """Search the mirror, answering a citation query by lookup and the rest by BM25.
+           limit: int = 10, include_text: bool = False, snippet_width: int = 320,
+           mode: str = "auto"):
+    """Search the mirror, answering a citation query by lookup and the rest by ranking.
 
     status defaults to 'active' because an agent asking what the law says almost never
     wants a repealed section silently mixed in; pass status=None to include them.
+
+    mode selects the ranker: 'text' is BM25 only, 'semantic' is embeddings only,
+    'hybrid' fuses them, and 'auto' (the default) uses hybrid when this mirror has a
+    semantic index and text when it does not - so the same call works with or without
+    the optional embedding step.
     """
     query = (query or "").strip()
     if not query:
@@ -111,11 +123,96 @@ def search(connection, query: str, *, corpus=None, title=None, status="active",
                 hit.pop("body_text", None)
             return [hit]
 
-    results = _fts_search(connection, query, corpus, title, status, limit, include_text, snippet_width, "AND")
+    if mode == "auto":
+        mode = "hybrid" if embed.is_available(connection) else "text"
+
+    if mode == "semantic":
+        return _semantic_search(connection, query, corpus, title, status, limit,
+                                include_text, snippet_width)
+    if mode == "hybrid":
+        return _hybrid_search(connection, query, corpus, title, status, limit,
+                              include_text, snippet_width)
+
+    results = _fts_search(connection, query, corpus, title, status, limit, include_text,
+                          snippet_width, "AND")
     if not results:
         # An unmatched conjunction usually means one rare word, not an empty corpus.
-        results = _fts_search(connection, query, corpus, title, status, limit, include_text, snippet_width, "OR")
+        results = _fts_search(connection, query, corpus, title, status, limit, include_text,
+                              snippet_width, "OR")
     return results
+
+
+def _semantic_search(connection, query, corpus, title, status, limit, include_text,
+                     snippet_width, *, embedder=None):
+    ranked = embed.nearest(connection, query, limit=limit * 3, embedder=embedder)
+    rows = _load_by_id(connection, [section_id for section_id, _ in ranked], corpus, title,
+                       status, include_text, query, snippet_width)
+    scores = dict(ranked)
+    for row in rows:
+        row["match"] = "semantic"
+        row["score"] = round(scores.get(row["id"], 0.0), 4)
+    rows.sort(key=lambda row: -row["score"])
+    return rows[:limit]
+
+
+def _hybrid_search(connection, query, corpus, title, status, limit, include_text,
+                   snippet_width, *, embedder=None):
+    """Fuse BM25 and embedding rankings, then return whole records for the winners."""
+    lexical = _fts_search(connection, query, corpus, title, status, limit * 3, False,
+                          snippet_width, "OR")
+    try:
+        semantic = embed.nearest(connection, query, limit=limit * 3, embedder=embedder)
+    except embed.EmbeddingError:
+        # A missing key or an unreachable provider must degrade to text search, not
+        # fail the query: the lexical index is always there.
+        return lexical[:limit]
+
+    fused = {}
+    for rank, row in enumerate(lexical):
+        fused.setdefault(row["id"], 0.0)
+        fused[row["id"]] += 1.0 / (RRF_K + rank + 1)
+    for rank, (section_id, _score) in enumerate(semantic):
+        fused.setdefault(section_id, 0.0)
+        fused[section_id] += 1.0 / (RRF_K + rank + 1)
+
+    order = sorted(fused, key=lambda section_id: -fused[section_id])[:limit]
+    rows = _load_by_id(connection, order, corpus, title, status, include_text, query, snippet_width)
+    for row in rows:
+        row["match"] = "hybrid"
+        row["score"] = round(fused.get(row["id"], 0.0), 6)
+    rows.sort(key=lambda row: -row["score"])
+    return rows
+
+
+def _load_by_id(connection, ids, corpus, title, status, include_text, query, snippet_width):
+    """Fetch full records for a ranked list of ids, applying the same filters as FTS."""
+    if not ids:
+        return []
+    columns = ", ".join(f"s.{c.strip()}" for c in RESULT_COLUMNS.split(",") if c.strip())
+    placeholders = ", ".join("?" * len(ids))
+    sql = f"SELECT {columns}, s.body_text, s.body_html FROM sections s WHERE s.id IN ({placeholders})"
+    params = list(ids)
+    if corpus:
+        sql += " AND s.corpus = ?"
+        params.append(corpus)
+    if title:
+        sql += " AND s.title_number = ?"
+        params.append(str(title))
+    if status:
+        sql += " AND s.status = ?"
+        params.append(status)
+
+    terms = query_terms(query)
+    out = []
+    for row in connection.execute(sql, params):
+        record = _row_to_dict(row)
+        if include_text:
+            record["references"] = citations.references_in_html(record.pop("body_html", ""))
+        else:
+            record.pop("body_html", None)
+            record["snippet"] = normalize.snippet(record.pop("body_text", ""), terms, snippet_width)
+        out.append(record)
+    return out
 
 
 def _fts_search(connection, query, corpus, title, status, limit, include_text, snippet_width, operator):

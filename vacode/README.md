@@ -37,7 +37,8 @@ an index rather than in a prompt.
 
 ## Install
 
-Nothing to install beyond Python 3.9+:
+Nothing to install beyond Python 3.9+ (numpy only if you want the optional semantic
+index):
 
 ```bash
 python -m vacode --help          # from this directory
@@ -82,6 +83,31 @@ Add `--json` to any of these for machine-readable output.
 
 Citations are accepted in the forms people actually write: `18.2-51`, `§ 18.2-51`,
 `Section 18.2-51`, `1VAC20-10-10`, `1 VAC 20-10-10`, `Va. Const. art. I, § 8`.
+
+## Optional: semantic search
+
+BM25 is very good at what legal text is mostly made of — terms of art, defined phrases,
+citations — and bad at the way people ask. *"What happens if I hurt someone with acid"*
+shares no word with *"malicious bodily injury by means of any caustic substance."*
+
+Embeddings fix that, and are opt-in because they need a dependency and a provider:
+
+```bash
+pip install numpy
+export VACODE_EMBED_API_KEY=sk-...        # or OPENAI_API_KEY / VOYAGE_API_KEY
+vacode embed                              # ~19M tokens for the full Code
+```
+
+Once built, `vacode search` fuses BM25 and vector rankings (reciprocal rank fusion) by
+default. Force one or the other with `--mode text` / `--mode semantic` / `--mode hybrid`.
+
+Providers: any OpenAI-compatible `/v1/embeddings` endpoint (`VACODE_EMBED_PROVIDER=openai`,
+the default — also covers Together and vLLM), Voyage (`voyage`), or a local Ollama
+(`ollama`). Set `VACODE_EMBED_BASE_URL` and `VACODE_EMBED_MODEL` to point anywhere else.
+
+Without numpy or without a provider, everything still works — `search` uses BM25 and says
+nothing about it. The embedding step is resumable and skips sections whose text has not
+changed since the last run.
 
 ## Give it to an agent
 

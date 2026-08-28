@@ -66,6 +66,12 @@ TOOLS = [
                               "description": "Return whole sections instead of snippets. Costly; use after narrowing."},
                 "include_inactive": {"type": "boolean", "default": False,
                                      "description": "Also return repealed, expired and reserved sections."},
+                "mode": {"type": "string", "enum": ["auto", "text", "semantic", "hybrid"],
+                         "default": "auto",
+                         "description": "Ranking strategy. Leave as auto unless a keyword search "
+                                        "missed something you are sure is there, in which case "
+                                        "'semantic' finds sections that mean the same thing in "
+                                        "different words."},
             },
             "required": ["query"],
         },
@@ -179,6 +185,7 @@ def _tool_search(connection, arguments):
         status=None if arguments.get("include_inactive") else "active",
         limit=int(arguments.get("limit") or 10),
         include_text=bool(arguments.get("full_text")),
+        mode=arguments.get("mode") or "auto",
     )
     if not results:
         return ("No matching sections. Try fewer or more common words, drop the `title` filter, "
