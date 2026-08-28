@@ -189,6 +189,7 @@ def cmd_embed(args):
         connection.executescript(embed.EMBEDDINGS_SCHEMA)
         connection.execute("DELETE FROM embeddings")
         connection.commit()
+        embed.forget(connection)
     try:
         totals = embed.build(connection, args.corpus, limit=args.limit, progress=_progress)
     except embed.EmbeddingError as exc:

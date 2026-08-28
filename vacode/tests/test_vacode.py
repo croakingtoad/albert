@@ -329,6 +329,12 @@ class TestSemanticSearch(unittest.TestCase):
         self.assertEqual(results[0]["citation"], "18.2-52")
         self.assertEqual(results[0]["match"], "text")
 
+    def test_the_cached_matrix_notices_a_rebuild(self):
+        self.assertTrue(embed.nearest(self.connection, "caustic", embedder=fake_embedder))
+        self.connection.execute("DELETE FROM embeddings")
+        self.connection.commit()
+        self.assertEqual(embed.nearest(self.connection, "caustic", embedder=fake_embedder), [])
+
     def test_a_changed_embedding_model_is_reported_not_silently_wrong(self):
         def wider(texts):
             return [[1.0] * 32 for _ in texts]

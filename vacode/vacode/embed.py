@@ -232,6 +232,29 @@ def is_available(connection) -> bool:
     return bool(row and row["n"])
 
 
+# The vector matrix is rebuilt from BLOBs on first use and then kept, keyed by the
+# connection: at 1536 dimensions the full Code is ~120 MB of blobs, which is nothing to
+# hold once and far too much to re-read on every query. A row count is cheap enough to
+# check each time, and catches a rebuild underneath a long-lived process.
+_MATRIX_CACHE = {}
+
+
+def _matrix(connection, numpy):
+    count = connection.execute("SELECT COUNT(*) AS n FROM embeddings").fetchone()["n"]
+    cached = _MATRIX_CACHE.get(id(connection))
+    if cached and cached[0] == count:
+        return cached[1], cached[2]
+
+    rows = connection.execute("SELECT section_id, vector FROM embeddings ORDER BY rowid").fetchall()
+    if not rows:
+        return [], None
+    section_ids = [row["section_id"] for row in rows]
+    matrix = numpy.frombuffer(b"".join(row["vector"] for row in rows), dtype=numpy.float16)
+    matrix = matrix.reshape(len(rows), -1).astype(numpy.float32)
+    _MATRIX_CACHE[id(connection)] = (count, section_ids, matrix)
+    return section_ids, matrix
+
+
 def nearest(connection, query: str, *, limit=20, embedder=None, config=None):
     """Section ids most similar to a query, best first, as (section_id, similarity).
 
@@ -242,15 +265,13 @@ def nearest(connection, query: str, *, limit=20, embedder=None, config=None):
     numpy = numpy_or_none()
     if numpy is None:
         raise EmbeddingError("semantic search needs numpy: pip install numpy")
-    rows = connection.execute("SELECT section_id, vector FROM embeddings").fetchall()
-    if not rows:
+
+    section_ids, matrix = _matrix(connection, numpy)
+    if matrix is None:
         return []
 
     embedder = embedder or (lambda texts: embed_texts(texts, config))
     query_vector = numpy.frombuffer(_pack(embedder([query])[0]), dtype=numpy.float16).astype(numpy.float32)
-
-    matrix = numpy.frombuffer(b"".join(row["vector"] for row in rows), dtype=numpy.float16)
-    matrix = matrix.reshape(len(rows), -1).astype(numpy.float32)
     if matrix.shape[1] != query_vector.shape[0]:
         raise EmbeddingError(
             f"stored vectors have {matrix.shape[1]} dimensions but the query has "
@@ -262,8 +283,16 @@ def nearest(connection, query: str, *, limit=20, embedder=None, config=None):
     # One section can own several chunks; it should be ranked by its best one.
     best = {}
     for position in numpy.argsort(-scores)[: limit * 4]:
-        section_id = rows[int(position)]["section_id"]
+        section_id = section_ids[int(position)]
         score = float(scores[int(position)])
         if score > best.get(section_id, -2.0):
             best[section_id] = score
     return sorted(best.items(), key=lambda item: -item[1])[:limit]
+
+
+def forget(connection=None) -> None:
+    """Drop the cached matrix, for a process that rebuilds the index in place."""
+    if connection is None:
+        _MATRIX_CACHE.clear()
+    else:
+        _MATRIX_CACHE.pop(id(connection), None)
