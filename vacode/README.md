@@ -31,11 +31,11 @@ Measured on a full harvest, 28 August 2026:
 | Titles | 76 | 24 | 13 articles |
 | Agencies | — | 152 | — |
 | Chapters | 1,553 | 2,183 | — |
-| Sections | **33,854** | ~26,000 | 130 |
+| Sections | **33,854** | **34,627** | 130 |
 | Repealed / expired / reserved | 2,262 | — | 0 |
 | Cross-references | 39,992 | — | — |
 | Plain text | 52 MB | — | — |
-| Harvest | 43 min at 12 workers, 0 errors | ~1 h | 11 s |
+| Harvest | 43 min at 12 workers, 0 errors | ~45 min | 11 s |
 
 The whole mirror — three corpora, full text, FTS5 index and the reference graph — is
 one 221 MB SQLite file. The Code of Virginia alone is roughly **13 million tokens** of
@@ -65,7 +65,7 @@ vacode --help
 ```bash
 vacode harvest                       # Code of Virginia (~45 min)
 vacode harvest --corpus constitution # ~10 seconds
-vacode harvest --corpus admincode    # regulations (~1 hour)
+vacode harvest --corpus admincode    # regulations (~45 min)
 vacode status
 ```
 
