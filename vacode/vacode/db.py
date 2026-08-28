@@ -167,6 +167,17 @@ def connect(path=None, *, read_only: bool = False) -> sqlite3.Connection:
         if not path.exists():
             raise FileNotFoundError(f"no mirror at {path} - run 'vacode harvest' first")
         connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+        connection.row_factory = sqlite3.Row
+        # A read-only handle cannot migrate, and a query against a mirror missing a
+        # column added since it was built fails with a bare SQLite error. Saying so
+        # here turns that into an instruction.
+        stored = get_meta(connection, "schema_version", "0")
+        if int(stored or 0) < SCHEMA_VERSION:
+            raise RuntimeError(
+                f"the mirror at {path} was built by an older version of vacode "
+                f"(schema {stored}, this build expects {SCHEMA_VERSION}); "
+                "run 'vacode reindex' once to migrate it - no re-crawl is needed"
+            )
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(path, timeout=60)
@@ -176,8 +187,11 @@ def connect(path=None, *, read_only: bool = False) -> sqlite3.Connection:
         # WAL lets readers keep working during a multi-hour harvest.
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA synchronous = NORMAL")
-        connection.executescript(SCHEMA)
+        # Migrations run first: SCHEMA creates indexes over columns added after the
+        # first release, so on an older mirror the script itself would fail before any
+        # migration could repair it. On a new database there is nothing to migrate.
         _migrate(connection)
+        connection.executescript(SCHEMA)
         set_meta(connection, "schema_version", str(SCHEMA_VERSION))
         connection.commit()
     return connection
@@ -192,7 +206,13 @@ _ADDED_COLUMNS = {
 
 
 def _migrate(connection: sqlite3.Connection) -> None:
+    tables = {row[0] for row in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'")}
     for table, columns in _ADDED_COLUMNS.items():
+        # A table absent altogether is a new database, not an old one: SCHEMA is about
+        # to create it with every column already in place.
+        if table not in tables:
+            continue
         existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
         for name, definition in columns.items():
             if name not in existing:

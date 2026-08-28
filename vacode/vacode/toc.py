@@ -60,7 +60,11 @@ def tier0(connection, corpus: str = "vacode") -> str:
 
 
 def tier1(connection, corpus: str, title_number: str) -> str:
-    """One title's chapters, articles and section headings."""
+    """One title's full outline: every level below it, down to section headings.
+
+    Written recursively rather than as title -> chapter -> section because the corpora
+    are not the same depth: regulations add an agency level between the two.
+    """
     listing = search.toc(connection, corpus, title_number)
     container = listing.get("container") or {"number": title_number, "name": ""}
     lines = [
@@ -69,23 +73,31 @@ def tier1(connection, corpus: str, title_number: str) -> str:
         f"Harvested {_stamp(connection, corpus)}.",
         "",
     ]
-
-    if listing["level"] == "sections":
-        # A title the service never divided into chapters - the UCC titles, which are
-        # organized into Parts and reached by enumeration rather than by chapter.
-        lines += _section_lines(listing["items"])
-    else:
-        for chapter in listing["items"]:
-            lines.append(f"## Chapter {chapter['number']}. {chapter['name']}".rstrip(". "))
-            lines.append("")
-            lines += _section_lines(search.sections_in(connection, corpus, chapter["key"]))
-            lines.append("")
-        unplaced = listing.get("unplaced_sections") or []
-        if unplaced:
-            lines += ["## Sections not assigned to a chapter", ""] + _section_lines(unplaced) + [""]
-
+    lines += _outline(connection, corpus, listing, depth=2)
     lines += ["", SOURCE_NOTE, ""]
     return "\n".join(lines)
+
+
+def _outline(connection, corpus, listing, depth):
+    """Render one level of the walk, recursing into each child container."""
+    lines = []
+    if listing["level"] == "sections":
+        return _section_lines(listing["items"])
+
+    for child in listing["items"]:
+        label = listing["level"].rstrip("s").title()
+        lines.append(f"{'#' * depth} {label} {child['number']}. {child['name']}".rstrip(". "))
+        lines.append("")
+        below = search.toc(connection, corpus, *child["key"].split("/"), include_counts=False)
+        lines += _outline(connection, corpus, below, depth + 1)
+        lines.append("")
+
+    unplaced = listing.get("unplaced_sections") or []
+    if unplaced:
+        lines += [f"{'#' * depth} Sections not assigned to a chapter", ""]
+        lines += _section_lines(unplaced)
+        lines.append("")
+    return lines
 
 
 def _section_lines(sections):

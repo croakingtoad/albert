@@ -324,22 +324,41 @@ def serve(database=None, stdin=None, stdout=None) -> int:
     """Run the stdio loop until the client closes the stream."""
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
+
+    # Section signs and em dashes are everywhere in this corpus, and a Windows console
+    # defaults to a codepage that cannot encode them - which would turn every response
+    # into a UnicodeEncodeError rather than a tool result.
+    for stream in (stdin, stdout):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8")
+            except (ValueError, OSError):
+                pass
+
     try:
         connection = db.connect(database, read_only=True)
     except FileNotFoundError as exc:
         print(f"vacode mcp: {exc}", file=sys.stderr)
         return 2
 
-    for line in stdin:
+    def reply(payload):
+        json.dump(payload, stdout, ensure_ascii=False)
+        stdout.write("\n")
+        stdout.flush()
+
+    # readline rather than iteration: iterating a text stream reads ahead, which on a
+    # pipe can hold a client's request until the next one arrives.
+    while True:
+        line = stdin.readline()
+        if not line:
+            return 0
         line = line.strip()
         if not line:
             continue
         try:
             message = json.loads(line)
         except ValueError:
-            json.dump(_error(None, -32700, "parse error"), stdout)
-            stdout.write("\n")
-            stdout.flush()
+            reply(_error(None, -32700, "parse error"))
             continue
         try:
             response = handle(message, connection)
@@ -347,7 +366,4 @@ def serve(database=None, stdin=None, stdout=None) -> int:
             traceback.print_exc(file=sys.stderr)
             response = _error(message.get("id"), -32603, "internal error")
         if response is not None:
-            json.dump(response, stdout, ensure_ascii=False)
-            stdout.write("\n")
-            stdout.flush()
-    return 0
+            reply(response)

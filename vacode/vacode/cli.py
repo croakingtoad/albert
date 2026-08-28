@@ -260,10 +260,20 @@ def build_parser():
 
 
 def main(argv=None):
+    # The corpus is full of section signs and em dashes; a console or pipe that
+    # defaults to a narrower codepage would fail on the first result rather than the
+    # first unusual one.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8")
+            except (ValueError, OSError):
+                pass
+
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
     except KeyboardInterrupt:

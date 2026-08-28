@@ -3,7 +3,9 @@
 Run with `python -m unittest discover -s tests` from the vacode directory.
 """
 
+import sqlite3
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -226,6 +228,40 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual([r["citation"] for r in search.cited_by(self.connection, "18.2-52")],
                          ["18.2-51"])
+
+
+class TestSchemaGuard(unittest.TestCase):
+    def test_an_older_mirror_is_told_how_to_migrate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "old.db"
+            connection = sqlite3.connect(path)
+            connection.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+            connection.execute("INSERT INTO meta VALUES ('schema_version', '1')")
+            connection.commit()
+            connection.close()
+            with self.assertRaises(RuntimeError) as caught:
+                db.connect(path, read_only=True)
+            self.assertIn("vacode reindex", str(caught.exception))
+
+    def test_a_missing_mirror_says_to_harvest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(FileNotFoundError) as caught:
+                db.connect(Path(directory) / "absent.db", read_only=True)
+            self.assertIn("vacode harvest", str(caught.exception))
+
+    def test_a_column_added_later_is_migrated_in_place(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mirror.db"
+            connection = db.connect(path)
+            # Reproduce a mirror built before container_key existed: the index over it
+            # has to go first, exactly as it would not have existed back then.
+            connection.execute("DROP INDEX sections_by_container")
+            connection.execute("ALTER TABLE sections DROP COLUMN container_key")
+            connection.commit()
+            connection.close()
+            connection = db.connect(path)
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(sections)")}
+            self.assertIn("container_key", columns)
 
 
 class TestMcpServer(unittest.TestCase):
