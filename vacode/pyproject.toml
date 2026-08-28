@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vacode"
+version = "1.0.0"
+description = "A local, searchable mirror of the Code of Virginia for LLM agents"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "PolyForm-Noncommercial-1.0.0" }
+keywords = ["virginia", "law", "code-of-virginia", "mcp", "legal-research", "llm", "agents"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Text Processing :: Indexing",
+]
+# No runtime dependencies, on purpose: the harvester, the index, the search and the
+# MCP server are all standard library, so the mirror runs anywhere Python does.
+dependencies = []
+
+[project.scripts]
+vacode = "vacode.cli:main"
+
+[tool.setuptools]
+packages = ["vacode"]
