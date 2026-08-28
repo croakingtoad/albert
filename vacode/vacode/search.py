@@ -390,6 +390,41 @@ def cited_by(connection, citation: str, corpus=None, limit: int = 25):
     return [_row_to_dict(r) for r in connection.execute(sql, params)]
 
 
+# How each corpus names its levels. Without this the Constitution renders as
+# "Title 1 > Chapter 8" when it means "Article I, section 8", and regulations lose the
+# agency that promulgated them.
+PLACE_LABELS = {
+    "vacode": [("title_number", "title_name", "Title"),
+               ("chapter_number", "chapter_name", "Chapter"),
+               ("article_number", "article_name", "Article"),
+               ("part_number", "part_name", "Part")],
+    "admincode": [("title_number", "title_name", "Title"),
+                  ("agency_number", "agency_name", "Agency"),
+                  ("chapter_number", "chapter_name", "Chapter"),
+                  ("part_number", "part_name", "Part"),
+                  ("article_number", "article_name", "Article")],
+    "constitution": [("title_number", "title_name", "Article")],
+}
+
+
+def describe_place(record) -> str:
+    """Where a section sits, named the way its own corpus names things."""
+    levels = PLACE_LABELS.get(record.get("corpus", "vacode"), PLACE_LABELS["vacode"])
+    parts = []
+    for number_key, name_key, label in levels:
+        number = (record.get(number_key) or "").strip()
+        if not number:
+            continue
+        parts.append(f"{label} {number}. {(record.get(name_key) or '').strip()}".rstrip(". "))
+    return " > ".join(parts)
+
+
+def format_citation(record) -> str:
+    """The citation with a section sign, unless it already carries one."""
+    citation = record.get("citation", "")
+    return citation if "\u00a7" in citation else f"\u00a7 {citation}"
+
+
 def stats(connection, path=None):
     """What is in the mirror and when it was last refreshed."""
     out = {"database": str(path or ""), "corpora": db.counts(connection)}

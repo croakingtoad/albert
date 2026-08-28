@@ -36,16 +36,8 @@ def _emit(args, payload, render):
 
 
 def _format_section(record, *, full=False):
-    lines = [f"§ {record['citation']}  {record['heading']}"]
-    place = " > ".join(
-        part for part in [
-            f"Title {record['title_number']}. {record['title_name']}".rstrip(". "),
-            f"Chapter {record['chapter_number']}. {record['chapter_name']}".rstrip(". ")
-            if record.get("chapter_number") else "",
-            f"Article {record['article_number']}. {record['article_name']}".rstrip(". ")
-            if record.get("article_number") else "",
-        ] if part.strip()
-    )
+    lines = [f"{search.format_citation(record)}  {record['heading']}"]
+    place = search.describe_place(record)
     if place:
         lines.append(place)
     if record.get("status") and record["status"] != "active":
@@ -126,13 +118,13 @@ def cmd_toc(args):
         if data["level"] == "sections":
             for item in data["items"]:
                 flag = "" if item["status"] == "active" else f"  [{item['status']}]"
-                print(f"  § {item['citation']:<16} {item['heading']}{flag}")
+                print(f"  {search.format_citation(item):<18} {item['heading']}{flag}")
             return
         label = data["level"].rstrip("s").title()
         for item in data["items"]:
             print(f"  {label} {item['number']:<10} {item['name']}  ({item['sections']} sections)")
         for item in data.get("unplaced_sections") or []:
-            print(f"  § {item['citation']:<16} {item['heading']}")
+            print(f"  {search.format_citation(item):<18} {item['heading']}")
     _emit(args, listing, render)
     return 0
 
@@ -141,7 +133,8 @@ def cmd_neighbors(args):
     connection = _connect(args)
     rows = search.neighbors(connection, args.citation, args.corpus, args.span)
     _emit(args, rows, lambda items: [
-        print(f"§ {i['citation']:<14} {i['heading']}" + ("" if i["status"] == "active" else f"  [{i['status']}]"))
+        print(f"{search.format_citation(i):<16} {i['heading']}"
+              + ("" if i["status"] == "active" else f"  [{i['status']}]"))
         for i in items
     ])
     return 0
@@ -150,7 +143,8 @@ def cmd_neighbors(args):
 def cmd_cited_by(args):
     connection = _connect(args)
     rows = search.cited_by(connection, args.citation, args.corpus, args.limit)
-    _emit(args, rows, lambda items: [print(f"§ {i['citation']:<14} {i['heading']}") for i in items])
+    _emit(args, rows, lambda items: [
+        print(f"{search.format_citation(i):<16} {i['heading']}") for i in items])
     return 0
 
 

@@ -101,15 +101,29 @@ def _outline(connection, corpus, listing, depth):
 
 
 def _section_lines(sections):
-    """Section headings, grouped under their article heading where the service gives one."""
-    lines, current_article = [], None
+    """Section headings, grouped under whichever subdivision the service gives them.
+
+    Most of the Code groups sections into Articles; the UCC titles have no chapters or
+    articles at all and group into Parts instead. Grouping on whichever one is present
+    keeps a UCC title's outline as readable as any other's.
+    """
+    lines, current = [], None
     for section in sections:
-        article = (section.get("article_number", ""), section.get("article_name", ""))
-        if article != current_article and any(article):
-            lines += [f"### Article {article[0]}. {article[1]}".rstrip(". "), ""]
-            current_article = article
+        if (section.get("article_number") or section.get("article_name")):
+            group = ("Article", section.get("article_number", ""), section.get("article_name", ""))
+        elif (section.get("part_number") or section.get("part_name")):
+            group = ("Part", section.get("part_number", ""), section.get("part_name", ""))
+        else:
+            group = None
+
+        if group and group != current:
+            if lines:
+                lines.append("")
+            lines += [f"### {group[0]} {group[1]}. {group[2]}".rstrip(". "), ""]
+            current = group
+
         flag = "" if section["status"] == "active" else f" [{section['status']}]"
-        lines.append(f"- § {section['citation']} — {section['heading']}{flag}")
+        lines.append(f"- \u00a7 {section['citation']} \u2014 {section['heading']}{flag}")
     return lines
 
 

@@ -24,16 +24,25 @@ browse over the result.
 
 ## What's in it
 
+Measured on a full harvest, 28 August 2026:
+
 | | Code of Virginia | Administrative Code | Constitution |
 | --- | ---: | ---: | ---: |
 | Titles | 76 | 24 | 13 articles |
-| Chapters | 1,577 | 2,183 | — |
-| Sections | ~33,200 | ~26,000 | 130 |
-| Full text | ~75 MB | — | — |
-| Harvest time | ~80 min | ~60 min | ~10 s |
+| Agencies | — | 152 | — |
+| Chapters | 1,553 | 2,183 | — |
+| Sections | **33,854** | ~26,000 | 130 |
+| Repealed / expired / reserved | 2,262 | — | 0 |
+| Cross-references | 39,992 | — | — |
+| Plain text | 52 MB | — | — |
+| Harvest | 43 min at 12 workers, 0 errors | ~1 h | 11 s |
 
-The Code of Virginia is roughly **15 million tokens** of text. That is why it lives in
-an index rather than in a prompt.
+The whole mirror — three corpora, full text, FTS5 index and the reference graph — is
+one 221 MB SQLite file. The Code of Virginia alone is roughly **13 million tokens** of
+text. That is why it lives in an index rather than in a prompt.
+
+99 of the 33,854 sections are known to the chapter listings but not to the detail
+operation — a gap in the source, recorded in the harvest queue rather than papered over.
 
 ## Install
 
@@ -54,9 +63,9 @@ vacode --help
 ## Harvest
 
 ```bash
-vacode harvest                       # Code of Virginia (~80 min)
+vacode harvest                       # Code of Virginia (~45 min)
 vacode harvest --corpus constitution # ~10 seconds
-vacode harvest --corpus admincode    # regulations (~60 min)
+vacode harvest --corpus admincode    # regulations (~1 hour)
 vacode status
 ```
 
@@ -169,11 +178,18 @@ the prompt but to put the **map** there, in tiers:
 vacode export-context ./context
 ```
 
-- `context/vacode/titles-map.md` — all 76 titles and their names. About **1,000 tokens**.
-  Small enough to keep resident; enough to route a question to a title before searching.
-- `context/vacode/titles/18.2.md` — that title's chapters, articles and section headings.
-  Median **6,000 tokens**, so you load the one title a question is about.
-- Section text itself stays in the index and is retrieved, not preloaded.
+Measured on the real corpus:
+
+| Tier | File | Size |
+| --- | --- | ---: |
+| 0 | `context/vacode/titles-map.md` — all 76 titles and their names | 4 KB, **~1,000 tokens** |
+| 1 | `context/vacode/titles/18.2.md` — one title's chapters, articles and section headings | median **~5,000 tokens** (largest, Title 15.2: ~43,000) |
+| 2 | the section text itself | retrieved from the index, never preloaded |
+
+Tier 0 is small enough to keep resident and is enough to route a question to a title
+before searching. Tier 1 is loaded for the one title a question is about. Titles the
+service organizes into Parts rather than Chapters (the UCC) are grouped by Part, so their
+outlines read the same way.
 
 Point any agent at those files — a Claude Code skill, a system prompt, a RAG loader, an
 `AGENTS.md`. They are plain Markdown on purpose.

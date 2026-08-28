@@ -145,20 +145,9 @@ TOOLS = [
 
 # --- rendering --------------------------------------------------------------
 
-def _place(record) -> str:
-    parts = []
-    if record.get("title_number"):
-        parts.append(f"Title {record['title_number']}. {record.get('title_name', '')}".rstrip(". "))
-    if record.get("chapter_number"):
-        parts.append(f"Chapter {record['chapter_number']}. {record.get('chapter_name', '')}".rstrip(". "))
-    if record.get("article_number"):
-        parts.append(f"Article {record['article_number']}. {record.get('article_name', '')}".rstrip(". "))
-    return " > ".join(p for p in parts if p.strip())
-
-
 def render_section(record, *, body_key="body_text") -> str:
-    lines = [f"§ {record['citation']} — {record['heading']}"]
-    place = _place(record)
+    lines = [f"{search.format_citation(record)} — {record['heading']}"]
+    place = search.describe_place(record)
     if place:
         lines.append(place)
     if record.get("status", "active") != "active":
@@ -226,14 +215,14 @@ def _tool_browse(connection, arguments):
         lines.append(f"{len(listing['items'])} sections:")
         for item in listing["items"]:
             flag = "" if item["status"] == "active" else f"  [{item['status']}]"
-            lines.append(f"  § {item['citation']} — {item['heading']}{flag}")
+            lines.append(f"  {search.format_citation(item)} — {item['heading']}{flag}")
     else:
         label = listing["level"].rstrip("s")
         lines.append(f"{len(listing['items'])} {listing['level']}:")
         for item in listing["items"]:
             lines.append(f"  {label} {item['number']}: {item['name']} ({item['sections']} sections)")
         for item in listing.get("unplaced_sections") or []:
-            lines.append(f"  § {item['citation']} — {item['heading']}")
+            lines.append(f"  {search.format_citation(item)} — {item['heading']}")
     if not listing["items"] and not listing.get("unplaced_sections"):
         lines.append("Nothing at that path. Call this tool with no arguments to see the titles.")
     return "\n".join(lines)
@@ -244,10 +233,10 @@ def _tool_context(connection, arguments):
     span = int(arguments.get("span") or 2)
     around = search.neighbors(connection, citation, span=span)
     inbound = search.cited_by(connection, citation)
-    lines = [f"Context for § {citation}:", "", "Codified nearby:"]
-    lines += [f"  § {i['citation']} — {i['heading']}" for i in around] or ["  (none)"]
+    lines = [f"Context for {citation}:", "", "Codified nearby:"]
+    lines += [f"  {search.format_citation(i)} — {i['heading']}" for i in around] or ["  (none)"]
     lines += ["", "Sections that cite it:"]
-    lines += [f"  § {i['citation']} — {i['heading']}" for i in inbound] or ["  (none)"]
+    lines += [f"  {search.format_citation(i)} — {i['heading']}" for i in inbound] or ["  (none)"]
     return "\n".join(lines)
 
 
