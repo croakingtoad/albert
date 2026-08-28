@@ -41,6 +41,8 @@ from . import db
 CHUNK_CHARS = 1200
 CHUNK_OVERLAP = 150
 BATCH_SIZE = 64
+# Sections read from SQLite per pass while building the index; see build().
+SECTION_BLOCK = 500
 
 PROVIDERS = {
     "openai": {"base_url": "https://api.openai.com/v1", "model": "text-embedding-3-small",
@@ -173,8 +175,9 @@ def build(connection, corpus=None, *, batch_size=BATCH_SIZE, limit=None, progres
     embedder = embedder or (lambda texts: embed_texts(texts, config))
     connection.executescript(EMBEDDINGS_SCHEMA)
 
-    sql = """SELECT s.id, s.heading, s.body_text, s.body_hash
-               FROM sections s
+    # Only the ids are collected up front; bodies are read a block at a time, so peak
+    # memory does not scale with the corpus.
+    sql = """SELECT s.id FROM sections s
                LEFT JOIN embeddings e ON e.section_id = s.id AND e.chunk_ix = 0
               WHERE s.body_text != '' AND (e.section_id IS NULL OR e.body_hash != s.body_hash)"""
     params = []
@@ -185,23 +188,30 @@ def build(connection, corpus=None, *, batch_size=BATCH_SIZE, limit=None, progres
     if limit:
         sql += " LIMIT ?"
         params.append(limit)
-    rows = connection.execute(sql, params).fetchall()
-    if not rows:
+    ids = [row["id"] for row in connection.execute(sql, params)]
+    if not ids:
         return {"sections": 0, "chunks": 0}
 
     pending, totals = [], {"sections": 0, "chunks": 0}
-    for row in rows:
-        for index, chunk in enumerate(chunks(row["heading"], row["body_text"])):
-            pending.append((row["id"], index, row["body_hash"], chunk))
-        totals["sections"] += 1
-        if len(pending) >= batch_size:
-            totals["chunks"] += _flush(connection, pending, embedder)
-            pending = []
-            progress("embed", totals["sections"], len(rows))
+    for start in range(0, len(ids), SECTION_BLOCK):
+        block = ids[start:start + SECTION_BLOCK]
+        placeholders = ", ".join("?" * len(block))
+        rows = connection.execute(
+            f"SELECT id, heading, body_text, body_hash FROM sections WHERE id IN ({placeholders})",
+            block,
+        ).fetchall()
+        for row in rows:
+            for index, chunk in enumerate(chunks(row["heading"], row["body_text"])):
+                pending.append((row["id"], index, row["body_hash"], chunk))
+            totals["sections"] += 1
+            while len(pending) >= batch_size:
+                totals["chunks"] += _flush(connection, pending[:batch_size], embedder)
+                pending = pending[batch_size:]
+        progress("embed", totals["sections"], len(ids))
     if pending:
         totals["chunks"] += _flush(connection, pending, embedder)
     connection.commit()
-    progress("embed", len(rows), len(rows))
+    progress("embed", len(ids), len(ids))
     db.set_meta(connection, "embedding_model", (config or settings())["model"])
     connection.commit()
     return totals

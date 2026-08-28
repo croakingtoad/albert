@@ -421,55 +421,72 @@ def _fetch_body(corpus, citation_key, payload):
     return citation_key, detail, None
 
 
+# How many sections one pass of the body phase pulls into memory at a time. The queue
+# is drained in batches rather than submitted whole: ThreadPoolExecutor.map schedules
+# every task up front, so handing it 34,000 sections means 34,000 queued tasks and a
+# growing pile of fetched bodies waiting to be written. Batching caps the footprint at
+# a constant regardless of how large the corpus is.
+BODY_BATCH = 500
+
+
 def bodies(connection, corpus, workers=DEFAULT_WORKERS, limit=None, progress=_noop):
-    """Drain the pending work queue, writing section text as it arrives."""
-    rows = connection.execute(
-        "SELECT citation_key, payload FROM harvest_queue WHERE corpus = ? AND state = 'pending'"
-        + (" LIMIT ?" if limit else ""),
-        (corpus, limit) if limit else (corpus,),
-    ).fetchall()
-    if not rows:
-        return {"fetched": 0, "changed": 0, "missing": 0, "errors": 0}
+    """Drain the pending work queue, writing section text as it arrives.
 
-    work = [(corpus, row["citation_key"], json.loads(row["payload"] or "{}")) for row in rows]
+    Each pass re-queries for pending work, so the loop advances purely because rows get
+    marked done - which also means an interrupted run and a resumed one take exactly
+    the same code path.
+    """
+    total = connection.execute(
+        "SELECT COUNT(*) AS n FROM harvest_queue WHERE corpus = ? AND state = 'pending'",
+        (corpus,),
+    ).fetchone()["n"]
+    if limit:
+        total = min(total, limit)
     stats = {"fetched": 0, "changed": 0, "missing": 0, "errors": 0}
-    stamp = _now()
-    pending_writes = 0
+    if not total:
+        return stats
 
-    with ThreadPoolExecutor(workers) as pool:
-        for citation_key, detail, error in pool.map(lambda item: _fetch_body(*item), work):
-            stats["fetched"] += 1
-            if error:
-                stats["errors"] += 1
-                connection.execute(
-                    "UPDATE harvest_queue SET state = 'error', error = ? WHERE corpus = ? AND citation_key = ?",
-                    (error[:500], corpus, citation_key),
-                )
-            elif detail is None:
-                # The heading appeared in a chapter listing but the detail operation
-                # does not know the citation. Recorded rather than retried: it is a
-                # gap in the source, not a transport failure.
-                stats["missing"] += 1
-                connection.execute(
-                    "UPDATE harvest_queue SET state = 'missing', error = '' WHERE corpus = ? AND citation_key = ?",
-                    (corpus, citation_key),
-                )
-            else:
-                if _store_body(connection, corpus, citation_key, detail, stamp):
-                    stats["changed"] += 1
-                connection.execute(
-                    "UPDATE harvest_queue SET state = 'done', error = '' WHERE corpus = ? AND citation_key = ?",
-                    (corpus, citation_key),
-                )
-            pending_writes += 1
-            if pending_writes >= COMMIT_EVERY:
-                connection.commit()
-                pending_writes = 0
-                progress("bodies", stats["fetched"], len(work))
+    stamp = _now()
+    while stats["fetched"] < total:
+        batch_size = min(BODY_BATCH, total - stats["fetched"])
+        rows = connection.execute(
+            """SELECT citation_key, payload FROM harvest_queue
+                WHERE corpus = ? AND state = 'pending' LIMIT ?""",
+            (corpus, batch_size),
+        ).fetchall()
+        if not rows:
+            break
+
+        work = [(corpus, row["citation_key"], json.loads(row["payload"] or "{}")) for row in rows]
+        with ThreadPoolExecutor(workers) as pool:
+            for citation_key, detail, error in pool.map(lambda item: _fetch_body(*item), work):
+                stats["fetched"] += 1
+                if error:
+                    stats["errors"] += 1
+                    _mark(connection, corpus, citation_key, "error", error[:500])
+                elif detail is None:
+                    # The heading appeared in a chapter listing but the detail operation
+                    # does not know the citation. Recorded rather than retried: it is a
+                    # gap in the source, not a transport failure.
+                    stats["missing"] += 1
+                    _mark(connection, corpus, citation_key, "missing")
+                else:
+                    if _store_body(connection, corpus, citation_key, detail, stamp):
+                        stats["changed"] += 1
+                    _mark(connection, corpus, citation_key, "done")
+        connection.commit()
+        progress("bodies", stats["fetched"], total)
 
     connection.commit()
-    progress("bodies", stats["fetched"], len(work))
+    progress("bodies", stats["fetched"], total)
     return stats
+
+
+def _mark(connection, corpus, citation_key, state, error=""):
+    connection.execute(
+        "UPDATE harvest_queue SET state = ?, error = ? WHERE corpus = ? AND citation_key = ?",
+        (state, error, corpus, citation_key),
+    )
 
 
 def _store_body(connection, corpus, citation_key, detail, stamp) -> bool:
@@ -554,6 +571,12 @@ def harvest(connection, corpus="vacode", workers=DEFAULT_WORKERS, *, skip_struct
     return stats
 
 
+# Reindex works through ids in blocks for the same reason the body phase does: the
+# bodies it reads are 75 MB of HTML for the Code alone, and none of it needs to be
+# resident at once.
+REINDEX_BATCH = 1000
+
+
 def reindex(connection, corpus=None, progress=_noop) -> dict:
     """Recompute derived data - container keys, sort keys, and the reference graph.
 
@@ -564,37 +587,39 @@ def reindex(connection, corpus=None, progress=_noop) -> dict:
     corpora = [corpus] if corpus else list(db.CORPORA)
     totals = {"sections": 0, "refs": 0}
     for name in corpora:
-        rows = connection.execute(
-            """SELECT id, corpus, citation, citation_key, title_number, agency_number,
-                      chapter_number, part_number, body_html
-                 FROM sections WHERE corpus = ?""",
-            (name,),
-        ).fetchall()
-        if not rows:
+        ids = [row["id"] for row in connection.execute(
+            "SELECT id FROM sections WHERE corpus = ? ORDER BY id", (name,))]
+        if not ids:
             continue
         connection.execute("DELETE FROM refs WHERE corpus = ?", (name,))
-        for index, row in enumerate(rows, start=1):
-            key = container_key_for(name, row)
-            connection.execute(
-                "UPDATE sections SET container_key = ?, sort_key = ? WHERE id = ?",
-                (key,
-                 db.sort_key(row["title_number"],
-                             row["chapter_number"] or row["part_number"] or "",
-                             row["citation"]),
-                 row["id"]),
-            )
-            for target in citations.references_in_html(row["body_html"]):
-                if target == row["citation_key"]:
-                    continue  # a section quoting its own number is not a reference
+
+        for start in range(0, len(ids), REINDEX_BATCH):
+            block = ids[start:start + REINDEX_BATCH]
+            placeholders = ", ".join("?" * len(block))
+            rows = connection.execute(
+                f"""SELECT id, corpus, citation, citation_key, title_number, agency_number,
+                           chapter_number, part_number, body_html
+                      FROM sections WHERE id IN ({placeholders})""",
+                block,
+            ).fetchall()
+            for row in rows:
                 connection.execute(
-                    "INSERT OR IGNORE INTO refs (corpus, from_key, to_key) VALUES (?, ?, ?)",
-                    (name, row["citation_key"], target),
+                    "UPDATE sections SET container_key = ?, sort_key = ? WHERE id = ?",
+                    (container_key_for(name, row),
+                     db.sort_key(row["title_number"],
+                                 row["chapter_number"] or row["part_number"] or "",
+                                 row["citation"]),
+                     row["id"]),
                 )
-                totals["refs"] += 1
-            totals["sections"] += 1
-            if index % 2000 == 0:
-                connection.commit()
-                progress("reindex", index, len(rows))
-        connection.commit()
-        progress("reindex", len(rows), len(rows))
+                for target in citations.references_in_html(row["body_html"]):
+                    if target == row["citation_key"]:
+                        continue  # a section quoting its own number is not a reference
+                    connection.execute(
+                        "INSERT OR IGNORE INTO refs (corpus, from_key, to_key) VALUES (?, ?, ?)",
+                        (name, row["citation_key"], target),
+                    )
+                    totals["refs"] += 1
+                totals["sections"] += 1
+            connection.commit()
+            progress("reindex", min(start + REINDEX_BATCH, len(ids)), len(ids))
     return totals

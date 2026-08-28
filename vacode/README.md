@@ -210,6 +210,93 @@ Repealed, expired and reserved sections are **kept**, flagged, and excluded from
 results unless you ask for them — an agent that cannot see that a provision was repealed
 will cite it as current law.
 
+## Deploying on a server
+
+Nothing listens on a port and there is no daemon: the mirror is a file, and every
+interface is a process that opens it. That makes a droplet install boring, which is the
+point.
+
+```bash
+sudo apt install -y python3 python3-venv git      # Ubuntu 22.04+ already has 3.10+
+git clone https://github.com/croakingtoad/VA-code-search.git /opt/vacode
+python3 -m venv /opt/vacode/.venv
+/opt/vacode/.venv/bin/pip install /opt/vacode
+export VACODE_DB=/var/lib/vacode/vacode.db
+/opt/vacode/.venv/bin/vacode harvest                    # ~45 min
+/opt/vacode/.venv/bin/vacode harvest --corpus admincode # ~45 min
+/opt/vacode/.venv/bin/vacode status
+```
+
+Measured footprint, full Code of Virginia:
+
+| | |
+| --- | ---: |
+| Disk, both corpora | ~450 MB |
+| Peak RSS, harvest | 45 MB |
+| Peak RSS, reindex | 22 MB |
+| Peak RSS, a query | 37 MB |
+| Outbound | HTTPS to `law.lis.virginia.gov`, harvest only |
+
+A 1 GB droplet is comfortable. The optional semantic index is the one memory-hungry
+part: it holds the vector matrix resident (~150 MB for the full Code at 1536 dimensions),
+so give that 2 GB.
+
+Requires Python 3.9+ with FTS5 in `sqlite3`, which is the default in every mainstream
+distro build.
+
+### Reaching it from an agent that runs somewhere else
+
+`vacode mcp` speaks MCP over **stdio**, so it expects to be launched by the agent as a
+child process. If the agent runs on the droplet, the config in the section above is all
+you need. If the agent runs on your laptop and the mirror lives on the droplet, ssh is
+the transport — the MCP client launches ssh, and ssh carries the pipe:
+
+```json
+{
+  "mcpServers": {
+    "vacode": {
+      "command": "ssh",
+      "args": ["droplet", "VACODE_DB=/var/lib/vacode/vacode.db",
+               "/opt/vacode/.venv/bin/vacode", "mcp"]
+    }
+  }
+}
+```
+
+That works because stdio MCP is just newline-delimited JSON-RPC on a pipe, and ssh gives
+you one. Use a key with no passphrase prompt, and make sure the login prints nothing to
+stdout (motd and banners go to stderr, so a default sshd is fine).
+
+There is deliberately **no HTTP transport**. Adding one would mean authenticating it, and
+an unauthenticated endpoint serving 34,000 sections is a liability with no upside over
+ssh.
+
+### Keeping it current
+
+Virginia's session laws generally take effect 1 July. A quarterly refresh re-fetches
+everything and rewrites only what changed:
+
+```
+# /etc/systemd/system/vacode-refresh.service
+[Service]
+Type=oneshot
+Environment=VACODE_DB=/var/lib/vacode/vacode.db
+ExecStart=/opt/vacode/.venv/bin/vacode harvest --refresh --quiet
+ExecStart=/opt/vacode/.venv/bin/vacode harvest --refresh --quiet --corpus admincode
+```
+
+```
+# /etc/systemd/system/vacode-refresh.timer
+[Timer]
+OnCalendar=Jan,Apr,Jul,Oct 05 03:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+```
+
+`systemctl enable --now vacode-refresh.timer`. An interrupted refresh resumes on the next
+run, so a reboot mid-harvest costs nothing.
+
 ## Notes on the upstream service
 
 Findings from building against it, since none of this is documented:
